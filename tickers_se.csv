@@ -1,0 +1,402 @@
+# Genererad av uppdatera_tickers.py från Nasdaq Stockholm
+# Marknader: MAIN_MARKET
+ticker,namn
+8TRA.ST,TRATON
+AAK.ST,AAK
+ABB.ST,ABB Ltd
+ACAD.ST,AcadeMedia
+ACAST.ST,Acast
+ACE.ST,Ascelia Pharma
+ACRI-A.ST,Acrinova A
+ACRI-B.ST,Acrinova B
+ACTI.ST,Active Biotech
+ADDT-B.ST,Addtech B
+AFRY.ST,AFRY
+AJA-B.ST,Byggmästare A J Ahlström H
+ALFA.ST,Alfa Laval
+ALIF-B.ST,AddLife B
+ALIG.ST,Alimak Group
+ALIV-SDB.ST,Autoliv SDB
+ALLEI.ST,Alleima
+ALLIGO-B.ST,Alligo B
+ALTRA.ST,Altra Fastigheter
+ALVO-SDB.ST,Alvotech SDB
+AMBEA.ST,Ambea
+ANNE-B.ST,Annehem Fastigheter B
+ANOD-B.ST,Addnode Group B
+APOTEA.ST,Apotea
+AQ.ST,AQ Group
+ARION-SDB.ST,Arion Banki SDB
+ARJO-B.ST,Arjo B
+ARP.ST,Arctic Paper
+ARPL.ST,Arla Plast
+ASKER.ST,Asker Healthcare Group
+ASMDEE-B.ST,Asmodee Group B
+ASSA-B.ST,ASSA ABLOY B
+ATCO-A.ST,Atlas Copco A
+ATCO-B.ST,Atlas Copco B
+ATIC.ST,Actic Group
+ATORX.ST,Alligator Bioscience
+ATRLJ-B.ST,Atrium Ljungberg B
+ATT.ST,Attendo
+AVARDA.ST,Avarda Bank
+AXFO.ST,Axfood
+AZA.ST,Avanza Bank Holding
+AZN.ST,AstraZeneca
+B3.ST,B3 Consulting Group
+BACTI-B.ST,Bactiguard Holding B
+BALCO.ST,Balco Group
+BALD-B.ST,Fast. Balder B
+BEGR.ST,BE Group
+BEIA-B.ST,Beijer Alma B
+BEIJ-B.ST,Beijer Ref B
+BERG-B.ST,Bergman & Beving B
+BERNER-B.ST,Berner Industrier B
+BESQAB.ST,Besqab
+BETCO.ST,Better Collective
+BETS-B.ST,Betsson B
+BHG.ST,BHG Group
+BICO.ST,BICO Group
+BILI-A.ST,Bilia A
+BILL.ST,Billerud
+BINV.ST,BioInvent International
+BIOA-B.ST,BioArctic B
+BIOG-B.ST,BioGaia B
+BMAX.ST,Byggmax Group
+BOL.ST,Boliden
+BONAV-A.ST,Bonava A
+BONAV-B.ST,Bonava B
+BONEX.ST,BONESUPPORT HOLDING
+BONG.ST,Bong
+BOOZT.ST,Boozt
+BORG.ST,Björn Borg
+BOUL.ST,Boule Diagnostics
+BRAV.ST,Bravida Holding
+BRIN-B.ST,Brinova Fastigheter B
+BTS-B.ST,BTS Group B
+BUFAB.ST,Bufab
+BULTEN.ST,Bulten
+BURE.ST,Bure Equity
+CAMX.ST,Camurus
+CANTA.ST,Cantargia
+CARA.ST,Carasent
+CAST.ST,Castellum
+CAT-A.ST,Catella A
+CAT-B.ST,Catella B
+CATE.ST,Catena
+CCC.ST,Cavotec Group
+CEVI.ST,CellaVision
+CIBUS.ST,Cibus Real Estate
+CINPHA.ST,Cinclus Pharma Holding
+CLA-B.ST,Cloetta B
+CLAS-B.ST,Clas Ohlson B
+CNCJO-B.ST,Concejo B
+COOR.ST,Coor Service Management Hold.
+CORE-A.ST,Corem Property Group A
+CORE-B.ST,Corem Property Group B
+CRAD-B.ST,C-RAD B
+CRED-A.ST,Creades A
+CTEK.ST,CTEK
+CTM.ST,Catena Media
+CTT.ST,CTT Systems
+CYNCA.ST,Cynca Nordic
+DEDI.ST,Dedicare B
+DIOS.ST,Diös Fastigheter
+DOM.ST,Dometic Group
+DUNI.ST,Duni
+DURC-B.ST,Duroc B
+DUST.ST,Dustin Group
+DYVOX.ST,Dynavox Group
+EAST.ST,Eastnine
+EG7.ST,Enad Global 7
+EGTX.ST,Egetis Therapeutics
+EKTA-B.ST,Elekta B
+ELAN-B.ST,Elanders B
+ELLOS.ST,Ellos Holding
+ELON.ST,Elon
+ELTEL.ST,Eltel
+ELUX-A.ST,Electrolux A
+ELUX-B.ST,Electrolux B
+EMBRAC-B.ST,Embracer Group B
+EMIL-B.ST,Fastighetsbolaget Emilshus B
+ENEA.ST,Enea
+ENGCON-B.ST,engcon B
+ENITY.ST,Enity Holding
+ENRO.ST,Eniro Group
+EOLU-B.ST,Eolus B
+EPEN.ST,Ependion
+EPI-A.ST,Epiroc A
+EPI-B.ST,Epiroc B
+EPIS-B.ST,Episurf B
+EPRO-B.ST,Electrolux Professional B
+EQL.ST,EQL Pharma
+EQT.ST,EQT
+ERIC-A.ST,Ericsson A
+ERIC-B.ST,Ericsson B
+ESSITY-A.ST,Essity A
+ESSITY-B.ST,Essity B
+EVO.ST,Evolution
+EWRK.ST,Ework Group
+FABG.ST,Fabege
+FAG.ST,Fagerhult Group
+FASTAT.ST,Fastator
+FG.ST,Fasadgruppen Group
+FLAT-B.ST,Flat Capital B
+FLERIE.ST,Flerie
+FMM-B.ST,FM Mattsson B
+FNM.ST,Ferronordic
+FNOVA-B.ST,Fortinova Fastigheter ser. B
+FOI-B.ST,Fenix Outdoor International B
+FPAR-A.ST,Fastpartner A
+G2M.ST,Gentoo Media
+G5EN.ST,G5 Entertainment
+GARO.ST,Garo
+GETI-B.ST,Getinge B
+GPG.ST,Genova Property Group
+GREEN.ST,Green Landscaping Group
+GRNG.ST,Gränges
+HACK.ST,Hacksaw
+HAKI-A.ST,HAKI Safety A
+HAKI-B.ST,HAKI Safety B
+HANZA.ST,HANZA
+HAV-B.ST,Havsfrun Investment B
+HEBA-B.ST,HEBA B
+HEM.ST,Hemnet Group
+HEXA-B.ST,Hexagon B
+HM-B.ST,Hennes & Mauritz B
+HMS.ST,HMS Networks
+HNSA.ST,Hansa Biopharma
+HOFI.ST,Hoist Finance
+HOLM-A.ST,Holmen A
+HOLM-B.ST,Holmen B
+HPOL-B.ST,HEXPOL B
+HTRO.ST,Hexatronic Group
+HUFV-A.ST,Hufvudstaden A
+HUM.ST,Humana
+HUMBLE.ST,Humble Group
+HUSQ-A.ST,Husqvarna A
+HUSQ-B.ST,Husqvarna B
+IBT-B.ST,Infant Bacterial TherapeuticsB
+IMMNOV.ST,Immunovia
+IMMU.ST,Mendus
+INDT.ST,Indutrade
+INDU-A.ST,Industrivärden A
+INDU-C.ST,Industrivärden C
+INFREA.ST,Infrea
+INISS-B.ST,Inission B
+INQ.ST,INQ Group
+INSTAL.ST,Instalco
+INTEA-B.ST,Intea Fastigheter B
+INTRUM.ST,Intrum
+INVE-A.ST,Investor A
+INVE-B.ST,Investor B
+INWI.ST,Inwido
+IPCO.ST,International Petroleum Corp.
+IRLAB-A.ST,IRLAB Therapeutics A
+IS.ST,Image Systems
+ISOFOL.ST,Isofol Medical
+ITAB.ST,ITAB Group
+IVSO.ST,INVISIO
+JM.ST,JM
+JOMA.ST,John Mattson Fastighetsföret.
+K2A-B.ST,K2A Knaust & Andersson B
+KABE-B.ST,KABE Group B
+KAR.ST,Karnov Group
+KARNEL-B.ST,Karnell Group B
+KDV-B.ST,KDventures B
+KEOC.ST,Keo Capital
+KFAST-B.ST,K-Fast Holding B
+KINV-A.ST,Kinnevik A
+KINV-B.ST,Kinnevik B
+KNOW.ST,Knowit
+LAGR-B.ST,Lagercrantz Group B
+LAMM-B.ST,Lammhults Design Group B
+LATO-B.ST,Latour B
+LIAB.ST,Lindab International
+LIFCO-B.ST,Lifco B
+LIME.ST,Lime Technologies
+LINC.ST,Linc
+LMGAB.ST,Linjemontage i Grästorp
+LOGI-B.ST,Logistea B
+LOOMIS.ST,Loomis
+LUG.ST,Lundin Gold
+LUMI.ST,Lundin Mining Corporation
+LUND-B.ST,Lundbergföretagen B
+MANG.ST,Mangold
+MCAP.ST,MedCap
+MCOV-B.ST,Medicover B
+MEAB-B.ST,Malmbergs Elektriska B
+MEKO.ST,MEKO
+MER.ST,Meren Energy
+MILDEF.ST,Mildef Group
+MIPS.ST,Mips
+MMGR-B.ST,Momentum Group B
+MOB.ST,Moberg Pharma
+MOMENT.ST,Moment Group
+MORROW.ST,Morrow Bank
+MSAB-B.ST,Micro Systemation B
+MSON-A.ST,Midsona A
+MSON-B.ST,Midsona B
+MTG-A.ST,Modern Times Group A
+MTG-B.ST,Modern Times Group B
+MTRS.ST,Munters Group
+MVIR.ST,Medivir
+MYCR.ST,Mycronic
+NAXS.ST,NAXS
+NCAB.ST,NCAB Group
+NCC-A.ST,NCC A
+NCC-B.ST,NCC B
+NDA-SE.ST,Nordea Bank Abp
+NELLY.ST,Nelly Group
+NEOBO.ST,Neobo Fastigheter
+NETEL.ST,Netel Holding
+NETI-B.ST,Net Insight B
+NEWA-B.ST,New Wave B
+NIBE-B.ST,NIBE Industrier B
+NICA.ST,Nanologica
+NIVI-B.ST,Nivika Fastigheter B
+NMAN.ST,Nederman Holding
+NOBA.ST,NOBA Bank Group
+NOBI.ST,Nobia
+NOLA-B.ST,Nolato B
+NORB-B.ST,Nordisk Bergteknik B
+NORION.ST,Norion Bank
+NOTE.ST,NOTE
+NP3.ST,NP3 Fastigheter
+NTECH.ST,Stockholm Nordtech Group
+NTEK-B.ST,NOVOTEK B
+NYOR.ST,Nyorda
+OCTV-SDB.ST,Octave Intelligence SDB
+OEM-B.ST,OEM International B
+ONCO.ST,Oncopeptides
+ORES.ST,Öresund
+ORRON.ST,Orrön Energy
+ORX.ST,Orexo
+OVZON.ST,Ovzon
+PACT.ST,Proact IT Group
+PCELL.ST,PowerCell Sweden
+PDX.ST,Paradox Interactive
+PEAB-B.ST,Peab B
+PIERCE.ST,Pierce Group
+PION-B.ST,PION Group B
+PLAZ-B.ST,Platzer Fastigheter Holding B
+PNDX-B.ST,Pandox B
+PREC.ST,Precise Biometrics
+PREV-B.ST,Prevas B
+PRFO.ST,Profoto Holding
+PRIC-B.ST,Pricer B
+PRISMA.ST,Prisma Properties
+PROF-B.ST,Profilgruppen B
+PUBLI.ST,PPI Public Property Invest
+QLINEA.ST,Q-Linea
+QLIRO.ST,Qliro
+RAIL.ST,Railcare Group
+RATO-A.ST,Ratos A
+RATO-B.ST,Ratos B
+RAY-B.ST,RaySearch Laboratories B
+REJL-B.ST,Rejlers B
+ROKO-B.ST,Röko B
+RROS.ST,Rottneros
+RUSTA.ST,Rusta
+RVRC.ST,RVRC Holding
+SAAB-B.ST,SAAB B
+SAFETY-B.ST,mySafety Group B
+SAGA-A.ST,Sagax A
+SAGA-B.ST,Sagax B
+SALIX.ST,Salix Group
+SAMPO-SEK.ST,Sampo Oyj A
+SAND.ST,Sandvik
+SANION.ST,Saniona
+SAVE.ST,Nordnet
+SBB-B.ST,Samhällsbyggnadsbo. i Norden B
+SCA-A.ST,SCA A
+SCA-B.ST,SCA B
+SCST.ST,Scandi Standard
+SDIP-B.ST,Sdiptech B
+SEAF.ST,Seafire
+SEB-A.ST,SEB A
+SEB-C.ST,SEB C
+SECT-B.ST,SECTRA B
+SECU-B.ST,Securitas B
+SEDANA.ST,Sedana Medical
+SEZI.ST,Senzime
+SF.ST,Stillfront Group
+SFAB.ST,Solid Försäkringsaktiebolag
+SFAST.ST,Stenhus Fastigheter i Norden
+SGG.ST,Sensys Gatso Group
+SHB-A.ST,Sv. Handelsbanken A
+SHB-B.ST,Sv. Handelsbanken B
+SHOT.ST,Scandic Hotels Group
+SILEX.ST,Silex Microsystems
+SINCH.ST,Sinch
+SINT.ST,SinterCast
+SIVE.ST,Sivers Semiconductors
+SKA-B.ST,Skanska B
+SKF-A.ST,SKF A
+SKF-B.ST,SKF B
+SKIS-B.ST,SkiStar B
+SLEEP.ST,Sleep Cycle
+SLP-B.ST,Swedish Logistic Property B
+SMCRT.ST,SmartCraft Group
+SOBI.ST,Swedish Orphan Biovitrum
+SOF-B.ST,Softronic B
+SSAB-A.ST,SSAB A
+SSAB-B.ST,SSAB B
+STAR-A.ST,Starbreeze A
+STAR-B.ST,Starbreeze B
+STE-A.ST,Stora Enso A
+STE-R.ST,Stora Enso R
+STEF-B.ST,Stendörren Fastigheter B
+STOR-B.ST,Storskogen Group B
+STORY-B.ST,Storytel B
+STWK.ST,Stockwik
+SVEAF-B.ST,Sveafastigheter
+SVED-B.ST,Svedbergs Group B
+SVIK.ST,Studsvik
+SVOL-A.ST,Svolder A
+SVOL-B.ST,Svolder B
+SWEC-A.ST,SWECO A
+SWEC-B.ST,SWECO B
+SWED-A.ST,Swedbank A
+SYNACT.ST,SynAct Pharma
+SYNSAM.ST,Synsam
+SYSR.ST,Systemair
+TANGEN-B.ST,Tången Industrikapital
+TEL2-A.ST,Tele2 A
+TEL2-B.ST,Tele2 B
+TELIA.ST,Telia Company
+THULE.ST,Thule Group
+TIETOS.ST,Tieto Oyj
+TOBII.ST,Tobii
+TRAC-B.ST,Traction  B
+TRANS.ST,Transtema Group
+TREL-B.ST,Trelleborg B
+TRIAN-B.ST,Trianon B
+TROAX.ST,Troax Group
+TRUE-B.ST,Truecaller B
+VBG-B.ST,VBG GROUP B
+VEFAB.ST,VEF
+VICO.ST,Vicore Pharma Holding
+VIMIAN.ST,Vimian Group
+VISC.ST,Gruvaktiebolaget Viscaria
+VIT-B.ST,Vitec Software Group B
+VITR.ST,Vitrolife
+VIVE.ST,Vivesto
+VNV.ST,VNV Global
+VOLCAR-B.ST,Volvo Car B
+VOLO.ST,Volati
+VOLV-A.ST,Volvo A
+VOLV-B.ST,Volvo B
+VPLAY-A.ST,Viaplay Group A
+VPLAY-B.ST,Viaplay Group B
+VSURE.ST,Verisure
+WALL-B.ST,Wallenstam B
+WBGR-B.ST,Wästbygg Gruppen B
+WIHL.ST,Wihlborgs Fastigheter
+WISE.ST,Wise Group
+WTW-A.ST,Wall to Wall Group A
+XANO-B.ST,XANO Industri B
+XBRANE.ST,Xbrane Biopharma
+XSPRAY.ST,Xspray Pharma
+XVIVO.ST,Xvivo Perfusion
+YUBICO.ST,Yubico
