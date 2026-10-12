@@ -76,7 +76,7 @@ def main() -> int:
     a = p.parse_args()
 
     kategorier = ["MAIN_MARKET"] + (["FIRST_NORTH"] if a.first_north else [])
-    aktier: dict[str, str] = {}
+    aktier: dict[str, tuple[str, str]] = {}
     for kat in kategorier:
         try:
             rader = hamta(kat)
@@ -95,7 +95,8 @@ def main() -> int:
             if not sym or UTESLUT.search(sym):
                 continue
             namn = str(r.get("fullName") or r.get("name") or sym).strip()
-            aktier.setdefault(till_yahoo(sym), namn)
+            isin = str(r.get("isin") or "").strip()
+            aktier.setdefault(till_yahoo(sym), (namn, isin))
         print(f"{kat}: {len(aktier) - fore} aktier", file=sys.stderr)
 
     if UTFIL.exists():
@@ -105,9 +106,9 @@ def main() -> int:
         f.write("# Genererad av uppdatera_tickers.py från Nasdaq Stockholm\n")
         f.write(f"# Marknader: {', '.join(kategorier)}\n")
         w = csv.writer(f)
-        w.writerow(["ticker", "namn"])
+        w.writerow(["ticker", "namn", "isin"])
         for t in sorted(aktier):
-            w.writerow([t, aktier[t]])
+            w.writerow([t, *aktier[t]])
 
     print(f"Skrev {len(aktier)} aktier till {UTFIL}", file=sys.stderr)
     return 0

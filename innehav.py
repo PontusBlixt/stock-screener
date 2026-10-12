@@ -102,7 +102,7 @@ def skriv_innehav(fil: Path, df: pd.DataFrame) -> None:
     ut = df[KOLUMNER].copy()
     ut["kopdatum"] = pd.to_datetime(ut["kopdatum"]).dt.strftime("%Y-%m-%d")
     tmp = fil.with_suffix(".tmp")
-    ut.to_csv(tmp, index=False, quoting=csv.QUOTE_MINIMAL)
+    ut.to_csv(tmp, index=False, quoting=csv.QUOTE_MINIMAL, float_format="%.10g")
     os.replace(tmp, fil)
 
 
@@ -340,7 +340,7 @@ def skriv_affarer(fil: Path, df: pd.DataFrame) -> None:
     for k in ["kopdatum", "saljdatum"]:
         ut[k] = pd.to_datetime(ut[k]).dt.strftime("%Y-%m-%d")
     tmp = fil.with_suffix(".tmp")
-    ut.to_csv(tmp, index=False, quoting=csv.QUOTE_MINIMAL)
+    ut.to_csv(tmp, index=False, quoting=csv.QUOTE_MINIMAL, float_format="%.10g")
     os.replace(tmp, fil)
 
 

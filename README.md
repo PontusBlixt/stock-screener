@@ -29,7 +29,7 @@ Rapporten visar också vilka som är **nya** på topplistan och vilka som **fall
 
 ```bash
 mkdir -p ~/screener && cd ~/screener
-# Kopiera hit: screener.py, innehav.py, app.py, uppdatera_tickers.py, tickers_se.csv
+# Kopiera hit: screener.py, innehav.py, app.py, avanza_import.py, uppdatera_tickers.py, tickers_se.csv
 
 python3 -m venv venv
 ./venv/bin/pip install yfinance pandas numpy flask waitress
@@ -48,6 +48,7 @@ Rapporterna hamnar i `/srv/storage/screener/` (ändra `utmapp` i `KONFIG` eller 
 - `screener_ÅÅÅÅ-MM-DD.csv` – all data, kan öppnas i Excel. Används också för veckojämförelsen och marknadsbredden, så radera inte de gamla.
 - `innehav.csv` – dina innehav (redigeras på webbsidan eller direkt i filen)
 - `affarer.csv` – dina avslutade affärer
+- `isin_tickers.csv` – sparade kopplingar ISIN → ticker och typ från importen
 - `kurser.csv` – stängningskurser som webbsidan använder för grafer och innehav
 
 Användaren som kör skriptet måste kunna skriva i mappen:
@@ -82,6 +83,21 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 - **Aktiesida** – kursgraf med MA50, MA200, köpkurs och stoppnivå, nyckeltal och status för varje säljregel.
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
 - **Arkiv** – tidigare veckorapporter, även som .md.
+
+### Importera från Avanza
+
+Det rekommenderade sättet att lägga in innehav. Under **Mina innehav → Importera transaktioner**:
+
+1. Exportera dina transaktioner från Avanza (Transaktioner → välj hela perioden → Exportera transaktioner).
+2. Ladda upp .csv-filen.
+3. Granska: välj vilka konton som ska räknas, kontrollera tickern för varje värdepapper och välj typ. Fonder och annat utan Yahoo-ticker väljer du *hoppa över* för.
+4. Klicka Importera.
+
+Varje köp blir ett eget innehav med exakt datum och kurs, inklusive courtage. Försäljningar dras från de äldsta köpen först (FIFO) och hamnar i historiken. Avanza räknar med genomsnittskurs (GAV), så resultatet per affär kan skilja sig något från Avanzas, men totalen blir densamma. Insättningar, utdelningar och skatt hoppas över.
+
+Importen ersätter `innehav.csv` och `affarer.csv`. De gamla sparas först som `*_fore_import_<tid>.csv`. Kopplingen ISIN → ticker och dina val av typ sparas i `isin_tickers.csv`, så nästa import går på några sekunder. Exportera alltid hela historiken.
+
+Tickern hittas i första hand i sparade kopplingar, sedan i `tickers_se.csv` (om den skapats med `uppdatera_tickers.py`, som nu även sparar ISIN) och sist via en sökning hos Yahoo.
 
 ### Sälja
 

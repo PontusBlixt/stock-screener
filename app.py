@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import json
 import math
 import os
 import re
@@ -34,12 +35,16 @@ import numpy as np
 import pandas as pd
 from flask import Flask, Response, abort, flash, redirect, render_template_string, request, send_file, url_for
 
+import avanza_import as ai
 import innehav as ih
 import screener as sc
 
 UTMAPP = Path(os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"])).expanduser()
 INNEHAV_FIL = UTMAPP / "innehav.csv"
 AFFAR_FIL = UTMAPP / "affarer.csv"
+KARTA_FIL = UTMAPP / "isin_tickers.csv"
+IMPORT_FIL = UTMAPP / ".avanza_import.csv"
+IMPORT_INST = UTMAPP / ".import_installningar.json"
 KURS_FIL = UTMAPP / "kurser.csv"
 LOSEN = os.environ.get("SCREENER_LOSEN", "")
 DEMO = os.environ.get("SCREENER_DEMO") == "1"
@@ -332,6 +337,11 @@ Kurser från {{ kursdatum or '–' }}.</p>
 {% else %}<div class="card muted">Inga innehav ännu – lägg till ditt första nedan.</div>{% endif %}
 
 <div class="grid">
+<div class="card" style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+<div><h2 style="margin:0">Importera från Avanza</h2>
+<span class="small muted">Läser in alla köp och försäljningar från Avanzas exportfil – rekommenderat i stället för att mata in för hand.</span></div>
+<a href="{{ url_for('import_sida') }}"><button type="button">Importera transaktioner</button></a>
+</div>
 <div class="card" style="grid-column:1/-1">
 <h2>Lägg till innehav</h2>
 <form class="rad" method="post" action="{{ url_for('lagg_till') }}">
@@ -710,6 +720,198 @@ def ta_bort_affar(idx: int):
         ih.skriv_affarer(AFFAR_FIL, aff.drop(index=idx).reset_index(drop=True))
         flash(f"Affären i {t} borttagen.", "ok")
     return redirect(url_for("utveckling_sida"))
+
+
+# ---------------------------------------------------------------------------
+# Import från Avanza
+# ---------------------------------------------------------------------------
+IMPORT_MALL = """
+<p class="small"><a href="{{ url_for('innehav_sida') }}">← Mina innehav</a></p>
+<h1>Importera från Avanza</h1>
+<div class="grid">
+<div class="card">
+<h2>1. Exportera från Avanza</h2>
+<ol class="small" style="margin:0;padding-left:18px">
+<li>Logga in på avanza.se och gå till <b>Transaktioner</b> (under Min ekonomi).</li>
+<li>Välj <b>hela perioden</b>, från ditt första köp till idag, och alla konton.</li>
+<li>Klicka <b>Exportera transaktioner</b>. Du får en .csv-fil.</li>
+</ol>
+<p class="small muted">Ta alltid med hela historiken. Saknas gamla köp kan försäljningar inte matchas.</p>
+</div>
+<div class="card">
+<h2>2. Ladda upp filen</h2>
+<form method="post" enctype="multipart/form-data">
+<input type="file" name="fil" accept=".csv,text/csv" required style="width:100%;margin-bottom:12px">
+<button type="submit">Läs in och granska</button>
+</form>
+<p class="small muted">Inget sparas förrän du har granskat och bekräftat. {{ antal_kopplingar }} sparade kopplingar ISIN → ticker återanvänds.</p>
+</div>
+</div>
+"""
+
+GRANSKA_MALL = """
+<p class="small"><a href="{{ url_for('import_sida') }}">← Ladda upp en annan fil</a></p>
+<h1>Granska importen</h1>
+<p class="muted">{{ antal_trans }} köp och försäljningar i {{ instr|length }} värdepapper, från {{ forsta }} till {{ senaste }}.
+{% if ignorerade %}Hoppar över: {% for k, n in ignorerade.items() %}{{ k }} ({{ n }}){{ ', ' if not loop.last }}{% endfor %}.{% endif %}</p>
+
+<form method="post" action="{{ url_for('import_bekrafta') }}">
+<div class="card" style="margin-bottom:16px">
+<h2>Konton</h2>
+{% for k in konton %}<label style="flex-direction:row;display:inline-flex;align-items:center;gap:6px;margin-right:18px;color:var(--text)">
+<input type="checkbox" name="konto" value="{{ k }}" {{ 'checked' if k in valda_konton }}> {{ k }}</label>{% endfor %}
+<p class="small muted" style="margin-bottom:0">Bocka bara i de konton som ska räknas, till exempel ditt ISK.</p>
+</div>
+
+<div class="wrap"><table style="min-width:900px">
+<thead><tr><th>Värdepapper</th><th class="num">Köp</th><th class="num">Sälj</th><th class="num">Äger nu</th>
+<th>Yahoo-ticker</th><th>Typ</th><th>Källa</th></tr></thead><tbody>
+{% for r in instr %}
+<tr{% if r.kalla == 'hittades inte' and r.typ != 'hoppa över' %} style="background:var(--b-bevaka)"{% endif %}>
+<td><b>{{ r.namn }}</b><div class="muted small">{{ r.isin or '–' }} · {{ r.valuta }}</div></td>
+<td class="num">{{ r.kop }}</td><td class="num">{{ r.salj }}</td>
+<td class="num">{% if r.netto > 0 %}<b>{{ r.netto|tal(0 if r.netto == r.netto|round else 4) }}</b>{% else %}<span class="muted">0</span>{% endif %}</td>
+<td><input type="hidden" name="nyckel_{{ loop.index0 }}" value="{{ r.nyckel }}">
+<input name="ticker_{{ loop.index0 }}" value="{{ r.ticker }}" placeholder="t.ex. VOLV-B.ST" style="width:140px"></td>
+<td><select name="typ_{{ loop.index0 }}">{% for t in typer %}<option {{ 'selected' if t == r.typ }}>{{ t }}</option>{% endfor %}</select></td>
+<td class="small muted">{{ r.kalla }}</td>
+</tr>{% endfor %}
+</tbody></table></div>
+<input type="hidden" name="antal" value="{{ instr|length }}">
+
+<div class="card" style="margin-top:16px">
+<p class="small" style="margin-top:0">Gula rader saknar ticker. Fyll i den (sök på finance.yahoo.com, svenska aktier slutar på <code>.ST</code>)
+eller välj <b>hoppa över</b>, till exempel för fonder. Värdepapper utan ticker importeras ändå till historiken men får ingen kursdata.</p>
+<p class="small"><b>Importen ersätter</b> dina nuvarande {{ n_innehav }} innehav och {{ n_affarer }} avslutade affärer.
+En säkerhetskopia sparas först. Dina val av ticker och typ sparas till nästa import.</p>
+<button type="submit">Importera</button>
+</div>
+</form>
+"""
+
+
+def _import_installningar() -> dict:
+    try:
+        return json.loads(IMPORT_INST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.route("/import", methods=["GET", "POST"])
+def import_sida():
+    if request.method == "POST":
+        fil = request.files.get("fil")
+        data = fil.read() if fil else b""
+        if not data:
+            flash("Välj en fil att ladda upp.", "fel")
+            return redirect(url_for("import_sida"))
+        try:
+            df = ai.las_export(data)
+        except Exception as e:
+            flash(f"Kunde inte läsa filen: {e}", "fel")
+            return redirect(url_for("import_sida"))
+        if df.empty:
+            flash("Filen innehåller inga transaktioner.", "fel")
+            return redirect(url_for("import_sida"))
+        IMPORT_FIL.write_bytes(data)
+        return redirect(url_for("import_granska"))
+    return sida("Importera", "innehav", IMPORT_MALL, antal_kopplingar=len(ai.las_karta(KARTA_FIL)))
+
+
+@app.route("/import/granska")
+def import_granska():
+    if not IMPORT_FIL.exists():
+        return redirect(url_for("import_sida"))
+    df = ai.las_export(IMPORT_FIL.read_bytes())
+    t, ignorerade = ai.transaktioner(df)
+    if t.empty:
+        flash("Hittade inga köp eller försäljningar i filen.", "fel")
+        return redirect(url_for("import_sida"))
+    instr = ai.instrument(t)
+    karta = ai.las_karta(KARTA_FIL)
+    tickerlista = ai.isin_fran_tickerlista(sc.MAPP / "tickers_se.csv")
+
+    # Slå upp okända ISIN hos Yahoo parallellt (bara första gången – sedan sparas de)
+    if not DEMO:
+        okanda = [(r["isin"], r["valuta"]) for r in instr.to_dict("records")
+                  if r["isin"] and r["isin"] not in karta and r["isin"] not in tickerlista]
+        if okanda:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(lambda a: ai.sok_yahoo(*a), okanda))
+    forslag = ai.foresla(instr, karta, tickerlista, ih.las_innehav(INNEHAV_FIL), sok=not DEMO)
+
+    konton = sorted(k for k in df["konto"].unique() if k)
+    sparade = _import_installningar().get("konton")
+    valda = [k for k in konton if k in sparade] if sparade else konton
+    return sida("Granska import", "innehav", GRANSKA_MALL, instr=forslag, typer=ai.IMPORT_TYPER,
+                antal_trans=len(t), ignorerade=ignorerade, konton=konton, valda_konton=valda or konton,
+                forsta=t["datum"].min().date(), senaste=t["datum"].max().date(),
+                n_innehav=len(ih.las_innehav(INNEHAV_FIL)), n_affarer=len(ih.las_affarer(AFFAR_FIL)))
+
+
+@app.route("/import/bekrafta", methods=["POST"])
+def import_bekrafta():
+    if not IMPORT_FIL.exists():
+        return redirect(url_for("import_sida"))
+    f = request.form
+    konton = f.getlist("konto")
+    if not konton:
+        flash("Välj minst ett konto.", "fel")
+        return redirect(url_for("import_granska"))
+
+    df = ai.las_export(IMPORT_FIL.read_bytes())
+    t, _ = ai.transaktioner(df, konton)
+    alla, _ = ai.transaktioner(df)
+    namn_per_nyckel = dict(zip(alla["nyckel"], alla["namn"]))
+    val = {}
+    for i in range(int(f.get("antal", 0))):
+        nyckel = f.get(f"nyckel_{i}", "")
+        if not nyckel:
+            continue
+        ticker = f.get(f"ticker_{i}", "").strip().upper()
+        if ticker and not re.fullmatch(r"[A-Z0-9.\-=^]{1,20}", ticker):
+            flash(f"Ogiltig ticker: {ticker}", "fel")
+            return redirect(url_for("import_granska"))
+        typ = f.get(f"typ_{i}", "kärna")
+        val[nyckel] = {"ticker": ticker, "typ": typ if typ in ai.IMPORT_TYPER else "kärna"}
+
+    inn, aff, varningar = ai.bygg(t, val)
+
+    # Säkerhetskopia, sedan skriv
+    stampel = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for fil in (INNEHAV_FIL, AFFAR_FIL):
+        if fil.exists():
+            fil.with_name(f"{fil.stem}_fore_import_{stampel}.csv").write_bytes(fil.read_bytes())
+    ih.skriv_affarer(AFFAR_FIL, aff)
+    ih.skriv_innehav(INNEHAV_FIL, inn)
+
+    karta = ai.las_karta(KARTA_FIL)
+    for nyckel, v in val.items():
+        karta[nyckel] = {"ticker": v["ticker"], "typ": v["typ"], "namn": namn_per_nyckel.get(nyckel, "")}
+    ai.skriv_karta(KARTA_FIL, karta)
+    IMPORT_INST.write_text(json.dumps({"konton": konton}, ensure_ascii=False), encoding="utf-8")
+
+    # Hämta kurser för allt som importerades
+    valutor = list(inn["valuta"]) + list(aff["valuta"])
+    behov = list(dict.fromkeys(
+        [x for x in list(inn["ticker"]) + list(aff["ticker"]) if re.fullmatch(r"[A-Z0-9.\-=^]{1,20}", x)
+         and not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}\d", x)]
+        + [x for x in (ih.fx_ticker(v) for v in valutor) if x] + [ih.JAMFORELSEINDEX]))
+    saknas = []
+    try:
+        saknas = uppdatera_kurser(behov) if behov else []
+    except Exception as e:
+        varningar.append(f"Kunde inte hämta kurser just nu ({e}). Klicka Uppdatera kurser senare.")
+    IMPORT_FIL.unlink(missing_ok=True)
+
+    flash(f"Importerade {len(inn)} köp som du fortfarande äger och {len(aff)} avslutade affärer. "
+          f"Tidigare innehav sparades som säkerhetskopia.", "ok")
+    if saknas:
+        flash("Ingen kursdata för: " + ", ".join(saknas) + ". Kontrollera tickern via en ny import.", "fel")
+    for v in varningar:
+        flash(v, "fel")
+    return redirect(url_for("innehav_sida"))
 
 
 # ---------------------------------------------------------------------------
