@@ -23,22 +23,22 @@ Ett Python-skript som varje vecka går igenom en lista svenska aktier och tar fr
 
 **4. Rankar** de som är kvar. Varje aktie får en percentilrank (0–100 %) på 12-1-momentum och på 6-månadersmomentum, och poängen är snittet av de två. Rank i stället för råa procent gör att en enda extrem aktie inte förvränger allt.
 
-Rapporten visar också vilka som är **nya** på topplistan och vilka som **fallit ur** sedan förra körningen, och flaggar dina egna innehav om de inte längre klarar filtren.
+Rapporten visar också vilka som är **nya** på topplistan och vilka som **fallit ur** sedan förra körningen, och ger dina innehav säljsignaler (se nedan).
 
 ## Installation på hemmaservern (Ubuntu)
 
 ```bash
 mkdir -p ~/screener && cd ~/screener
-# Kopiera hit screener.py och tickers_se.csv
+# Kopiera hit: screener.py, innehav.py, app.py, uppdatera_tickers.py, tickers_se.csv
 
 python3 -m venv venv
-./venv/bin/pip install yfinance pandas numpy
+./venv/bin/pip install yfinance pandas numpy flask waitress
 
 # Testa först utan internet:
 ./venv/bin/python screener.py --demo
 
 # Sedan på riktigt:
-./venv/bin/python screener.py --innehav SWED-A.ST
+./venv/bin/python screener.py
 ```
 
 Rapporterna hamnar i `/srv/storage/screener/` (ändra `utmapp` i `KONFIG` eller använd `--utmapp`):
@@ -46,6 +46,9 @@ Rapporterna hamnar i `/srv/storage/screener/` (ändra `utmapp` i `KONFIG` eller 
 - `rapport_ÅÅÅÅ-MM-DD.html` – sparad kopia per vecka
 - `rapport_ÅÅÅÅ-MM-DD.md` – samma rapport som text, bra att klistra in i en chatt
 - `screener_ÅÅÅÅ-MM-DD.csv` – all data, kan öppnas i Excel. Används också för veckojämförelsen och marknadsbredden, så radera inte de gamla.
+- `innehav.csv` – dina innehav (redigeras på webbsidan eller direkt i filen)
+- `affarer.csv` – dina avslutade affärer
+- `kurser.csv` – stängningskurser som webbsidan använder för grafer och innehav
 
 Användaren som kör skriptet måste kunna skriva i mappen:
 
@@ -54,15 +57,74 @@ sudo mkdir -p /srv/storage/screener
 sudo chown $USER /srv/storage/screener
 ```
 
+## Webbsidan: veckans rapport och dina innehav
+
+`app.py` är en liten webbserver som visar veckans rapport, dina innehav med säljsignaler och en detaljsida med kursgraf för varje aktie. Den använder runt 50 MB RAM.
+
+Starta den som en tjänst så att den alltid körs, även efter omstart:
+
+```bash
+sudo cp screener-web.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now screener-web
+```
+
+Öppna sedan `http://<serverns-ip>:8080` i webbläsaren. Status och fel ser du med `systemctl status screener-web` och `journalctl -u screener-web -f`.
+
+Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen förutsätter användaren `blixt` och mappen `/home/blixt/screener`). Vill du kräva lösenord avkommenterar du raden `SCREENER_LOSEN`. Kör du brandvägg (`ufw`) behöver port 8080 öppnas för hemnätet: `sudo ufw allow from 192.168.0.0/16 to any port 8080`.
+
+**Exponera inte porten mot internet.** Vill du nå sidan utifrån, använd Tailscale.
+
+### Sidorna
+
+- **Veckans rapport** – samma som `senaste.html`. Klicka på en ticker för att se dess graf.
+- **Mina innehav** – lägg till ett köp (ticker, typ, datum, kurs, antal) eller ta bort ett. Kurserna hämtas direkt när du lägger till, och knappen *Uppdatera kurser* hämtar dagens kurser. Rankningen uppdateras bara vid veckokörningen.
+- **Aktiesida** – kursgraf med MA50, MA200, köpkurs och stoppnivå, nyckeltal och status för varje säljregel.
+- **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
+- **Arkiv** – tidigare veckorapporter, även som .md.
+
+### Sälja
+
+Klicka **Sälj** på ett innehav och ange säljdatum, kursen du fick och antal. Säljer du en del (till exempel vid trimning) ligger resten kvar som innehav. Den sålda delen sparas i `affarer.csv` och syns under Utveckling. **Ta bort** finns kvar för felinmatningar och sparar ingenting.
+
+### Utveckling mot index
+
+Utvecklingen räknas som tidsviktad avkastning: varje dag räknas avkastningen på det du ägde, så köp och försäljningar flyttar inte kurvan. Köpdagen räknas från din köpkurs och säljdagen till din säljkurs. Utländska aktier räknas om till kronor med dagens växelkurs.
+
+Jämförelseindex är `^OMXSPI` (hela Stockholmsbörsen). Det kan ändras till `^OMX` (OMXS30) med `JAMFORELSEINDEX` i `innehav.py`. Båda är prisindex utan utdelningar, så index ser ungefär 3 procentenheter per år sämre ut än en indexfond. Dina aktiekurser är däremot justerade för utdelningar, vilket gör jämförelsen något för fördelaktig för dig.
+
+Kurshistorik för dina innehav, sålda aktier och index hämtas 5 år bakåt och sparas i `kurser.csv`. Innehav köpta tidigare än så räknas från första kända kurs.
+
+### Typer av innehav
+
+- **momentum** – hobbydelen. Säljreglerna gäller och ger beslut: SÄLJ, SÄLJ VID MÅNADSGENOMGÅNG, BEVAKA, TRIMMA eller BEHÅLL.
+- **kärna** – långsiktiga innehav. Signalerna visas som information men ger inget säljbeslut.
+- **övrigt** – t.ex. tester av andra verktyg. Visas som information.
+
+### Säljreglerna
+
+Ändras i `REGLER` högst upp i `innehav.py`.
+
+| Regel | Beslut | Kollas |
+|---|---|---|
+| Kursen under MA200 | SÄLJ | varje vecka |
+| MA50 under MA200 | SÄLJ | varje vecka |
+| Kursen −20 % från högsta stängning sedan köp (släpande stopp) | SÄLJ | varje vecka |
+| Utanför topp 40 i screenern | SÄLJ VID MÅNADSGENOMGÅNG | en gång i månaden |
+| Nära någon av gränserna ovan | BEVAKA | – |
+| Positionen > 1,5 × jämn fördelning (minst 15 %) | TRIMMA | vid månadsgenomgång |
+
+Köpregeln är topp 20, säljregeln topp 40. Bufferten emellan gör att en aktie som glider lite i rankningen inte säljs i onödan.
+
+Resultatet räknas på kurs mot köpkurs, utan mottagna utdelningar. Utländska innehav räknas om till kronor med dagens växelkurs.
+
 ## Köra automatiskt varje vecka
 
 Öppna crontab med `crontab -e` och lägg till (lördag kl. 08:00, efter att fredagens kurser är klara):
 
 ```
-0 8 * * 6 cd ~/screener && ./venv/bin/python screener.py --innehav SWED-A.ST >> /srv/storage/screener/logg.txt 2>&1
+0 8 * * 6 cd ~/screener && ./venv/bin/python screener.py >> /srv/storage/screener/logg.txt 2>&1
 ```
-
-Byt `SWED-A.ST` mot alla dina innehav, kommaseparerade.
 
 ## Anpassa
 
@@ -77,7 +139,7 @@ Av topplistan markeras de som också klarar:
 
 ### Ett aktieslag per bolag
 
-Har ett bolag flera aktieslag (SSAB A och B, SEB A och C) behålls bara det mest likvida, så samma bolag inte tar två platser. Äger du ett av aktieslagen och anger det i `--innehav` behålls det i stället. Stäng av med `"ett_aktieslag_per_bolag": False`.
+Har ett bolag flera aktieslag (SSAB A och B, SEB A och C) behålls bara det mest likvida, så samma bolag inte tar två platser. Äger du ett av aktieslagen (finns i `innehav.csv`) behålls det i stället. Stäng av med `"ett_aktieslag_per_bolag": False`.
 
 ### Hela Stockholmsbörsen
 

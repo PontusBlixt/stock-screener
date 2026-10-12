@@ -47,6 +47,7 @@ import innehav as ih
 KONFIG = {
     "utmapp": "/srv/storage/screener",  # här hamnar rapporterna (din share)
     "historik": "2y",                 # hur mycket kurshistorik som hämtas
+    "historik_egna": "5y",            # för dina innehav, sålda aktier och index
     "min_dagar": 260,                 # minst ~1 års handel krävs för att mäta momentum
     "min_omsattning_sek": 5_000_000,  # snittomsättning/dag (20 dagar) – annars för illikvid
     "krav_over_ma200": True,          # kursen måste ligga över 200-dagars medelvärde
@@ -294,7 +295,7 @@ def bortfall_per_orsak(tabell: pd.DataFrame) -> list[tuple[str, int]]:
     return sorted(antal.items(), key=lambda x: -x[1])
 
 
-def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo):
+def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo, utv_rader=()):
     n_godk = int(tabell["godkand"].sum())
     delar = [f"# Momentum-screener – {idag}" + (" (DEMODATA)" if demo else ""),
              "",
@@ -320,6 +321,8 @@ def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute
 
     if analys:
         delar += [""] + ih.markdown_rader(analys)
+    if utv_rader:
+        delar += [""] + utv_rader
 
     if len(bredd) > 1:
         delar += ["", "## Marknadsbredd (andel som klarar trendfiltren)", ""]
@@ -462,7 +465,7 @@ volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %. Håll muspekaren 
     fil.write_text(sida, encoding="utf-8")
 
 
-def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool) -> list[Path]:
+def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader=()) -> list[Path]:
     utmapp.mkdir(parents=True, exist_ok=True)
     idag = dt.date.today().isoformat()
 
@@ -483,7 +486,7 @@ def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool) -> list[P
     md = utmapp / f"rapport_{idag}.md"
     ht = utmapp / f"rapport_{idag}.html"
     args = (idag, tabell, topp, saknade, analys, nya, ute, bredd, demo)
-    skriv_markdown(md, *args)
+    skriv_markdown(md, *args, utv_rader=utv_rader)
     skriv_html(ht, *args)
     # senaste.html skrivs alltid över – bokmärk den
     (utmapp / "senaste.html").write_text(ht.read_text(encoding="utf-8"), encoding="utf-8")
@@ -522,17 +525,30 @@ def main() -> int:
     # Innehaven: deras kurser hämtas också, även om de inte finns i den svenska listan
     # (t.ex. amerikanska aktier), plus valutakurser för att räkna om till SEK.
     innehav_df = ih.las_innehav(utmapp / "innehav.csv")
+    affarer_df = ih.las_affarer(utmapp / "affarer.csv")
     innehav = list(innehav_df["ticker"])
-    extra = [t for t in innehav if t not in set(tickers)]
-    extra += sorted({f for f in (ih.fx_ticker(v) for v in innehav_df["valuta"]) if f})
-    alla = tickers + [t for t in dict.fromkeys(extra)]
 
-    print(f"Hämtar kurser för {len(tickers)} aktier + {len(alla) - len(tickers)} innehav/valutor ...",
-          file=sys.stderr)
-    kurser = demodata(alla) if a.demo else hamta_kurser(alla, KONFIG["historik"])
+    # Egna aktier (nuvarande och sålda), valutor och jämförelseindex hämtas med
+    # längre historik, så att utvecklingen kan räknas ända från köpet.
+    valutor = list(innehav_df["valuta"]) + list(affarer_df["valuta"])
+    egna = list(dict.fromkeys(innehav + list(affarer_df["ticker"])
+                              + sorted({f for f in (ih.fx_ticker(v) for v in valutor) if f})
+                              + [ih.JAMFORELSEINDEX]))
 
-    # Spara stängningskurserna – webbsidan använder dem för graferna och innehaven
-    stangning = ih.slå_ihop_kurser(pd.DataFrame(), {t: df["Close"] for t, df in kurser.items()})
+    print(f"Hämtar kurser för {len(tickers)} aktier + {len(egna)} egna/valutor/index ...", file=sys.stderr)
+    if a.demo:
+        kurser = demodata(list(dict.fromkeys(tickers + egna)))
+        egna_kurser = {t: kurser[t] for t in egna if t in kurser}
+    else:
+        kurser = hamta_kurser(tickers, KONFIG["historik"])
+        egna_kurser = hamta_kurser(egna, KONFIG["historik_egna"])
+        kurser.update({t: df for t, df in egna_kurser.items() if t not in kurser})
+
+    # Spara stängningskurserna – webbsidan använder dem för grafer, innehav och utveckling.
+    # Gamla kolumner som inte hämtades nu (t.ex. sålda bolag som avnoterats) behålls.
+    stangning = ih.slå_ihop_kurser(ih.las_kurser(utmapp / "kurser.csv"),
+                                   {t: df["Close"] for t, df in kurser.items()})
+    stangning = ih.slå_ihop_kurser(stangning, {t: df["Close"] for t, df in egna_kurser.items()})
     ih.skriv_kurser(utmapp / "kurser.csv", stangning)
 
     rader, saknade = [], []
@@ -556,7 +572,8 @@ def main() -> int:
     tabell = filtrera_och_ranka(tabell)
 
     analys = ih.analysera(innehav_df, stangning, tabell)
-    filer = skriv_rapporter(tabell, saknade, analys, utmapp, a.demo)
+    utv_rader = ih.utveckling_markdown(innehav_df, affarer_df, stangning)
+    filer = skriv_rapporter(tabell, saknade, analys, utmapp, a.demo, utv_rader)
     print(filer[0].read_text(encoding="utf-8"))
     for f in filer:
         print(f"Sparad: {f}", file=sys.stderr)

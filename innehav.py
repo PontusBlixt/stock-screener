@@ -301,3 +301,206 @@ def markdown_rader(analys: list[dict]) -> list[str]:
         rader.append(f"| {a['ticker']} | {a['typ']} | **{a['beslut']}** | {p(a['resultat'])} | {p(a['fran_hogsta'])} "
                      f"| {p(a['till_stopp'])} | {p(a['over_ma200'])} | {plats} | {orsak} |")
     return rader
+
+
+# ---------------------------------------------------------------------------
+# AFFÄRSHISTORIK (avslutade affärer)
+# ---------------------------------------------------------------------------
+# affarer.csv ligger bredvid innehav.csv. En rad per försäljning; säljer du en del
+# av ett innehav blir den sålda delen en affär och resten ligger kvar som innehav.
+AFFAR_KOLUMNER = ["ticker", "typ", "kopdatum", "kopkurs", "saljdatum", "saljkurs", "antal", "valuta",
+                  "fx_kop", "fx_salj", "resultat_sek", "orsak", "notering"]
+
+SALJORSAKER = ["trendregel (MA200/MA50)", "släpande stopp", "utanför topp 40", "trimning",
+               "eget beslut", "annat"]
+
+# Jämförelseindex på Yahoo Finance. ^OMXSPI = hela Stockholmsbörsen, ^OMX = OMXS30.
+# Båda är prisindex (utan utdelningar), så index ser något sämre ut än verkligheten (~3 %/år).
+JAMFORELSEINDEX = "^OMXSPI"
+INDEXNAMN = {"^OMXSPI": "OMX Stockholm PI", "^OMX": "OMXS30"}
+
+
+def las_affarer(fil: Path) -> pd.DataFrame:
+    if not fil.exists():
+        return pd.DataFrame(columns=AFFAR_KOLUMNER)
+    df = pd.read_csv(fil, dtype=str, keep_default_na=False)
+    for k in AFFAR_KOLUMNER:
+        if k not in df.columns:
+            df[k] = ""
+    df = df[AFFAR_KOLUMNER].copy()
+    for k in ["kopkurs", "saljkurs", "antal", "fx_kop", "fx_salj", "resultat_sek"]:
+        df[k] = pd.to_numeric(df[k].str.replace(",", "."), errors="coerce")
+    for k in ["kopdatum", "saljdatum"]:
+        df[k] = pd.to_datetime(df[k], errors="coerce")
+    return df.reset_index(drop=True)
+
+
+def skriv_affarer(fil: Path, df: pd.DataFrame) -> None:
+    ut = df[AFFAR_KOLUMNER].copy()
+    for k in ["kopdatum", "saljdatum"]:
+        ut[k] = pd.to_datetime(ut[k]).dt.strftime("%Y-%m-%d")
+    tmp = fil.with_suffix(".tmp")
+    ut.to_csv(tmp, index=False, quoting=csv.QUOTE_MINIMAL)
+    os.replace(tmp, fil)
+
+
+def fx_vid(kurser: pd.DataFrame, valuta: str, datum) -> float:
+    """Växelkurs till SEK vid ett datum (senast kända). 1.0 för SEK, NaN om den saknas."""
+    fxt = fx_ticker(valuta)
+    if not fxt:
+        return 1.0
+    if fxt not in kurser.columns:
+        return np.nan
+    s = kurser[fxt].dropna()
+    if s.empty:
+        return np.nan
+    v = s.asof(pd.Timestamp(datum))
+    return float(v) if pd.notna(v) else float(s.iloc[0])
+
+
+def salj(innehav: pd.DataFrame, idx: int, saljdatum, saljkurs: float, antal: float,
+         orsak: str, kurser: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Säljer hela eller en del av innehav nr idx. Returnerar (nya innehav, affärsraden)."""
+    h = innehav.iloc[idx]
+    antal = min(float(antal), float(h["antal"]))
+    fx_k = fx_vid(kurser, h["valuta"], h["kopdatum"])
+    fx_s = fx_vid(kurser, h["valuta"], saljdatum)
+    affar = {
+        "ticker": h["ticker"], "typ": h["typ"], "kopdatum": h["kopdatum"], "kopkurs": h["kopkurs"],
+        "saljdatum": pd.Timestamp(saljdatum), "saljkurs": float(saljkurs), "antal": antal,
+        "valuta": h["valuta"], "fx_kop": fx_k, "fx_salj": fx_s,
+        "resultat_sek": antal * (float(saljkurs) * fx_s - float(h["kopkurs"]) * fx_k),
+        "orsak": orsak, "notering": h["notering"],
+    }
+    ny = innehav.copy()
+    kvar = float(h["antal"]) - antal
+    if kvar > 1e-9:
+        ny.loc[ny.index[idx], "antal"] = kvar
+    else:
+        ny = ny.drop(index=ny.index[idx]).reset_index(drop=True)
+    return ny, affar
+
+
+def affarsstatistik(affarer: pd.DataFrame) -> dict:
+    """Träffsäkerhet, snittvinst och snittförlust för avslutade affärer."""
+    if affarer.empty:
+        return {"antal": 0}
+    r = affarer["saljkurs"] / affarer["kopkurs"] - 1
+    vinst, forl = r[r > 0], r[r <= 0]
+    return {
+        "antal": len(affarer),
+        "vinnare": len(vinst),
+        "traffsakerhet": len(vinst) / len(affarer),
+        "snittvinst": vinst.mean() if len(vinst) else np.nan,
+        "snittforlust": forl.mean() if len(forl) else np.nan,
+        "resultat_sek": affarer["resultat_sek"].sum(skipna=True),
+        "snitt_dagar": (affarer["saljdatum"] - affarer["kopdatum"]).dt.days.mean(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# UTVECKLING (tidsviktad avkastning)
+# ---------------------------------------------------------------------------
+def utveckling(innehav: pd.DataFrame, affarer: pd.DataFrame, kurser: pd.DataFrame,
+               typer: list[str] | None = None) -> pd.DataFrame:
+    """Portföljens utveckling dag för dag, som tidsviktad avkastning.
+
+    För varje handelsdag t och varje position som ägdes under dagen:
+      början_t = gårdagens stängningsvärde (köpdagen: köpkurs × antal)
+      slut_t   = dagens stängningsvärde    (säljdagen: säljkurs × antal)
+    Dagens avkastning = Σ slut_t / Σ början_t − 1, och dagarna kedjas ihop.
+    Köp och försäljningar påverkar alltså inte kurvan, bara hur aktierna rörde sig.
+    Allt räknas om till SEK med dagens växelkurs.
+
+    Returnerar DataFrame med 'varde_sek' (marknadsvärde vid dagens slut, sålt
+    borträknat) och 'avkastning' (ackumulerad, 0.10 = +10 %).
+    """
+    tom = pd.DataFrame(columns=["varde_sek", "avkastning"])
+    pos = [(h.ticker, h.typ, h.antal, h.kopdatum, h.kopkurs, h.valuta, None, None)
+           for h in innehav.itertuples()]
+    pos += [(a.ticker, a.typ, a.antal, a.kopdatum, a.kopkurs, a.valuta, a.saljdatum, a.saljkurs)
+            for a in affarer.itertuples()]
+    if typer:
+        pos = [p for p in pos if p[1] in typer]
+    pos = [p for p in pos if p[0] in kurser.columns and all(pd.notna(x) for x in (p[2], p[3], p[4]))]
+    if not pos or kurser.empty:
+        return tom
+
+    alla_dagar = kurser.index
+    borjan = pd.Series(0.0, index=alla_dagar)
+    slutv = pd.Series(0.0, index=alla_dagar)
+    varde = pd.Series(0.0, index=alla_dagar)
+    forsta = None
+
+    for ticker, _typ, antal, kopd, kopk, valuta, sald, salk in pos:
+        s = kurser[ticker].ffill()
+        fxt = fx_ticker(valuta)
+        if fxt:
+            if fxt not in kurser.columns:
+                continue                       # valutakurs saknas
+            fx = kurser[fxt].ffill().bfill()
+        else:
+            fx = pd.Series(1.0, index=alla_dagar)
+        mask = (alla_dagar >= kopd) & s.notna().values
+        if sald is not None:
+            mask &= alla_dagar <= sald
+        dagar = alla_dagar[mask]
+        if len(dagar) == 0:
+            continue
+        stang = antal * s.loc[dagar] * fx.loc[dagar]          # stängningsvärde
+        slut = stang.copy()
+        if sald is not None:
+            slut.iloc[-1] = antal * salk * fx.loc[dagar[-1]]   # säljdagen: säljkursen
+        b = stang.shift(1)
+        if kopd >= s.first_valid_index():
+            b.iloc[0] = antal * kopk * fx.loc[dagar[0]]        # köpdagen: köpkursen
+        else:
+            b.iloc[0] = stang.iloc[0]   # köpt före kurshistoriken: räkna från första kända kurs
+        borjan.loc[dagar] += b
+        slutv.loc[dagar] += slut
+        kvar = dagar[:-1] if sald is not None else dagar        # sålt: inte kvar vid dagens slut
+        varde.loc[kvar] += stang.loc[kvar]
+        forsta = dagar[0] if forsta is None else min(forsta, dagar[0])
+
+    if forsta is None:
+        return tom
+    d = alla_dagar[alla_dagar >= forsta]
+    r = (slutv.loc[d] / borjan.loc[d].where(borjan.loc[d] > 0) - 1).fillna(0.0)
+    return pd.DataFrame({"varde_sek": varde.loc[d], "avkastning": (1 + r).cumprod() - 1}, index=d)
+
+
+def indexutveckling(kurser: pd.DataFrame, datum: pd.DatetimeIndex, ticker: str = JAMFORELSEINDEX) -> pd.Series | None:
+    """Indexets ackumulerade utveckling över samma dagar, från stängningen dagen före första dagen."""
+    if ticker not in kurser.columns or len(datum) == 0:
+        return None
+    s = kurser[ticker].dropna()
+    if s.empty:
+        return None
+    bas = s.asof(datum[0] - pd.Timedelta(days=1))
+    if pd.isna(bas):
+        bas = s.iloc[0]
+    return (s.reindex(datum).ffill() / bas - 1)
+
+
+def utveckling_markdown(innehav: pd.DataFrame, affarer: pd.DataFrame, kurser: pd.DataFrame) -> list[str]:
+    """Kort sammanfattning av utveckling mot index och avslutade affärer, till veckorapporten."""
+    rader = []
+    namn = INDEXNAMN.get(JAMFORELSEINDEX, JAMFORELSEINDEX)
+    for etikett, typer in (("Momentum", ["momentum"]), ("Hela portföljen", None)):
+        u = utveckling(innehav, affarer, kurser, typer)
+        if len(u) < 2:
+            continue
+        idx = indexutveckling(kurser, u.index)
+        p = u["avkastning"].iloc[-1]
+        i = idx.iloc[-1] if idx is not None and pd.notna(idx.iloc[-1]) else None
+        txt = f"- **{etikett}** sedan {u.index[0].date()}: {p * 100:+.1f} %"
+        if i is not None:
+            txt += f" · {namn}: {i * 100:+.1f} % · skillnad {(p - i) * 100:+.1f} procentenheter"
+        rader.append(txt)
+    s = affarsstatistik(affarer)
+    if s["antal"]:
+        rader.append(f"- **Avslutade affärer:** {s['antal']} st, träffsäkerhet {s['traffsakerhet'] * 100:.0f} %, "
+                     f"snittvinst {s['snittvinst'] * 100 if pd.notna(s['snittvinst']) else 0:+.1f} %, "
+                     f"snittförlust {s['snittforlust'] * 100 if pd.notna(s['snittforlust']) else 0:+.1f} %, "
+                     f"realiserat {s['resultat_sek']:,.0f} kr".replace(",", " "))
+    return (["## Utveckling", ""] + rader) if rader else []

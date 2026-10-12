@@ -39,6 +39,7 @@ import screener as sc
 
 UTMAPP = Path(os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"])).expanduser()
 INNEHAV_FIL = UTMAPP / "innehav.csv"
+AFFAR_FIL = UTMAPP / "affarer.csv"
 KURS_FIL = UTMAPP / "kurser.csv"
 LOSEN = os.environ.get("SCREENER_LOSEN", "")
 DEMO = os.environ.get("SCREENER_DEMO") == "1"
@@ -79,7 +80,7 @@ def kurser() -> pd.DataFrame:
 
 def hamta(tickers: list[str]) -> dict[str, pd.Series]:
     """Hämtar 2 års stängningskurser för några tickers."""
-    data = sc.demodata(tickers, seed=len("".join(tickers))) if DEMO else sc.hamta_kurser(tickers, "2y")
+    data = sc.demodata(tickers, seed=len("".join(tickers))) if DEMO else sc.hamta_kurser(tickers, sc.KONFIG["historik_egna"])
     return {t: df["Close"] for t, df in data.items()}
 
 
@@ -203,7 +204,8 @@ ul.regler { list-style:none; padding:0; margin:0 } ul.regler li { display:flex; 
 ul.regler li:last-child { border:0 }
 .prick { width:10px; height:10px; border-radius:50%; margin-top:6px; flex:none }
 .p-ok { background:var(--pos) } .p-bevaka { background:var(--gul) } .p-brutet { background:var(--neg) } .p-na { background:var(--linje) }
-svg.graf { width:100%; height:auto; display:block }
+svg.graf { width:100%; height:auto; display:block; min-width:560px }
+.grafwrap { overflow-x:auto }
 dl.nyckel { display:grid; grid-template-columns:auto auto; gap:6px 16px; margin:0 } dl.nyckel dt { color:var(--muted) } dl.nyckel dd { margin:0; text-align:right; font-variant-numeric:tabular-nums }
 footer { margin-top:24px; font-size:12px; color:var(--muted) }
 """
@@ -214,6 +216,7 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 <nav class="topp"><div><b>📈 Screener</b>
 <a href="{{ url_for('rapport') }}" class="{{ 'aktiv' if sida=='rapport' }}">Veckans rapport</a>
 <a href="{{ url_for('innehav_sida') }}" class="{{ 'aktiv' if sida=='innehav' }}">Mina innehav</a>
+<a href="{{ url_for('utveckling_sida') }}" class="{{ 'aktiv' if sida=='utveckling' }}">Utveckling</a>
 <a href="{{ url_for('arkiv') }}" class="{{ 'aktiv' if sida=='arkiv' }}">Arkiv</a></div></nav>
 <main>
 {% with meddelanden = get_flashed_messages(with_categories=true) %}{% for kat, m in meddelanden %}
@@ -234,7 +237,7 @@ def sida(titel: str, flik: str, mall: str, **kw) -> str:
 NAV_INJEKTION = """<nav style="background:var(--kort);border-bottom:1px solid var(--linje)">
 <div style="max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;gap:20px;flex-wrap:wrap">
 <b>📈 Screener</b><a href="/" style="color:var(--text);font-weight:600;text-decoration:none">Veckans rapport</a>
-<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
+<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
 
 LANK_SKRIPT = """<script>
 document.querySelectorAll('[data-t]').forEach(function(el){
@@ -288,6 +291,9 @@ INNEHAV_MALL = """
 Kurser från {{ kursdatum or '–' }}.</p>
 
 <div class="stats">
+<div class="stat" style="border-color:var(--accent)"><span class="muted small">Totalt innehav</span><b>{{ total.varde|kr }}</b>
+<span class="small {{ total.resultat|klass }}">{{ total.resultat_kr|kr }} ({{ total.resultat|pct }})</span>
+<div class="small"><a href="{{ url_for('utveckling_sida') }}">Utveckling och historik →</a></div></div>
 {% for typ, s in summa.items() if s.antal %}
 <div class="stat"><span class="muted small">{{ typ|capitalize }} ({{ s.antal }})</span><b>{{ s.varde|kr }}</b>
 <span class="small {{ s.resultat|klass }}">{{ s.resultat|pct }}</span></div>
@@ -317,8 +323,10 @@ Kurser från {{ kursdatum or '–' }}.</p>
 <td class="num">{% if a.plats %}{{ a.plats }}/{{ a.n_godkanda }}{% elif a.i_screener %}<span class="neg">ej godk.</span>{% else %}–{% endif %}</td>
 <td class="small">{{ (a.signaler + a.manad + a.bevaka + (['för stor andel – trimma'] if a.trimma else []))|join('; ') }}</td>
 {% endif %}
-<td><form method="post" action="{{ url_for('ta_bort', idx=loop.index0) }}" onsubmit="return confirm('Ta bort {{ a.ticker }}?')">
-<button class="lank" type="submit">Ta bort</button></form></td>
+<td style="white-space:nowrap"><a href="{{ url_for('salj_sida', idx=loop.index0) }}"><b>Sälj</b></a>
+<form method="post" action="{{ url_for('ta_bort', idx=loop.index0) }}" style="display:inline;margin-left:8px"
+ onsubmit="return confirm('Ta bort {{ a.ticker }} helt, utan att spara som affär? Använd Sälj om du sålt aktien.')">
+<button class="lank" type="submit" title="För felinmatningar">Ta bort</button></form></td>
 </tr>{% endfor %}
 </tbody></table></div>
 {% else %}<div class="card muted">Inga innehav ännu – lägg till ditt första nedan.</div>{% endif %}
@@ -369,8 +377,11 @@ def innehav_sida():
             beslut_antal[a["beslut"]] = beslut_antal.get(a["beslut"], 0) + 1
     k = kurser()
     kursdatum = k.index.max().date() if len(k) else None
+    varde = sum(a["varde_sek"] for a in analys if _ok(a.get("varde_sek")))
+    ansk = sum(a["anskaffning_sek"] for a in analys if _ok(a.get("varde_sek")) and _ok(a.get("anskaffning_sek")))
+    total = {"varde": varde, "resultat_kr": varde - ansk, "resultat": varde / ansk - 1 if ansk else None}
     return sida("Mina innehav", "innehav", INNEHAV_MALL, analys=analys, summa=ih.sammanfattning(analys),
-                beslut_antal=beslut_antal, typer=ih.TYPER, idag=dt.date.today().isoformat(),
+                beslut_antal=beslut_antal, total=total, typer=ih.TYPER, idag=dt.date.today().isoformat(),
                 regler=ih.REGLER, kursdatum=kursdatum)
 
 
@@ -396,6 +407,8 @@ def lagg_till():
 
     # Hämta kurser för aktien (och valutan) direkt, så att sidan kan visa den
     behov = [ticker] + ([ih.fx_ticker(valuta)] if ih.fx_ticker(valuta) else [])
+    if ih.JAMFORELSEINDEX not in kurser().columns:
+        behov.append(ih.JAMFORELSEINDEX)
     try:
         saknas = uppdatera_kurser(behov)
     except Exception as e:  # nätverksfel m.m.
@@ -428,8 +441,9 @@ def ta_bort(idx: int):
 @app.route("/innehav/uppdatera", methods=["POST"])
 def uppdatera():
     df = ih.las_innehav(INNEHAV_FIL)
-    behov = list(dict.fromkeys(list(df["ticker"]) + [x for x in (ih.fx_ticker(v) for v in df["valuta"]) if x]))
-    if not behov:
+    behov = list(dict.fromkeys(list(df["ticker"]) + [x for x in (ih.fx_ticker(v) for v in df["valuta"]) if x]
+                               + [ih.JAMFORELSEINDEX]))
+    if len(behov) <= 1:
         flash("Inga innehav att uppdatera.", "fel")
         return redirect(url_for("innehav_sida"))
     try:
@@ -440,6 +454,262 @@ def uppdatera():
     flash("Kurserna uppdaterade." + (f" Saknade data: {', '.join(saknas)}" if saknas else ""),
           "fel" if saknas else "ok")
     return redirect(url_for("innehav_sida"))
+
+
+# ---------------------------------------------------------------------------
+# Sälj
+# ---------------------------------------------------------------------------
+SALJ_MALL = """
+<p class="small"><a href="{{ url_for('innehav_sida') }}">← Mina innehav</a></p>
+<h1>Sälj {{ h.ticker|kort }}</h1>
+<p class="muted">Köpt {{ h.kopdatum|datum }} · {{ h.antal|tal(0) }} st à {{ h.kopkurs|tal }} {{ h.valuta }} · senaste kurs {{ kurs|tal }}</p>
+<div class="card" style="max-width:640px">
+<form class="rad" method="post">
+<label>Säljdatum<input type="date" name="saljdatum" value="{{ idag }}" required></label>
+<label>Säljkurs ({{ h.valuta }})<input name="saljkurs" value="{{ kurs_txt }}" required inputmode="decimal"></label>
+<label>Antal<input name="antal" value="{{ antal_txt }}" required inputmode="decimal"></label>
+<label>Orsak<select name="orsak">{% for o in orsaker %}<option {{ 'selected' if o == forslag }}>{{ o }}</option>{% endfor %}</select></label>
+<button type="submit">Registrera försäljning</button>
+</form>
+<p class="small muted">Säljer du färre aktier än du äger ligger resten kvar som innehav. Ange kursen du faktiskt fick (Avanza visar den under avslutade affärer).</p>
+{% if signaler %}<p class="small">Aktuella signaler: {{ signaler }}</p>{% endif %}
+</div>
+"""
+
+
+def _forslag_orsak(a: dict) -> str:
+    if any("stopp" in s for s in a.get("signaler", [])):
+        return "släpande stopp"
+    if a.get("signaler"):
+        return "trendregel (MA200/MA50)"
+    if a.get("manad"):
+        return "utanför topp 40"
+    if a.get("trimma"):
+        return "trimning"
+    return "eget beslut"
+
+
+@app.route("/innehav/salj/<int:idx>", methods=["GET", "POST"])
+def salj_sida(idx: int):
+    df, analys = analysera_allt()
+    if not 0 <= idx < len(df):
+        abort(404)
+    h = df.iloc[idx]
+    a = analys[idx]
+    if request.method == "POST":
+        f = request.form
+        try:
+            saljkurs, antal = _tal(f["saljkurs"]), _tal(f["antal"])
+            saljdatum = pd.to_datetime(f["saljdatum"])
+        except (ValueError, KeyError):
+            flash("Säljkurs, antal och datum måste vara ifyllda med siffror.", "fel")
+            return redirect(url_for("salj_sida", idx=idx))
+        if antal <= 0 or saljkurs <= 0:
+            flash("Antal och kurs måste vara större än noll.", "fel")
+            return redirect(url_for("salj_sida", idx=idx))
+        if pd.notna(h["kopdatum"]) and saljdatum < h["kopdatum"]:
+            flash("Säljdatum kan inte vara före köpdatum.", "fel")
+            return redirect(url_for("salj_sida", idx=idx))
+        orsak = f.get("orsak", "annat") if f.get("orsak") in ih.SALJORSAKER else "annat"
+        nya, affar = ih.salj(df, idx, saljdatum, saljkurs, antal, orsak, kurser())
+        aff = ih.las_affarer(AFFAR_FIL)
+        aff = pd.concat([aff, pd.DataFrame([affar])], ignore_index=True) if len(aff) else pd.DataFrame([affar])
+        ih.skriv_affarer(AFFAR_FIL, aff)          # spara affären först ...
+        ih.skriv_innehav(INNEHAV_FIL, nya)        # ... sedan det som är kvar
+        r = affar["saljkurs"] / affar["kopkurs"] - 1
+        flash(f"Sålde {affar['antal']:g} {h['ticker']} – {r * 100:+.1f} % ({affar['resultat_sek']:,.0f} kr)."
+              .replace(",", " "), "ok")
+        return redirect(url_for("innehav_sida"))
+
+    kurs = a.get("kurs", h["kopkurs"])
+    return sida(f"Sälj {h['ticker']}", "innehav", SALJ_MALL, h=h, kurs=kurs,
+                kurs_txt=f"{kurs:.2f}".replace(".", ","), antal_txt=f"{h['antal']:g}",
+                idag=dt.date.today().isoformat(), orsaker=ih.SALJORSAKER, forslag=_forslag_orsak(a),
+                signaler="; ".join(a.get("signaler", []) + a.get("manad", [])))
+
+
+# ---------------------------------------------------------------------------
+# Utveckling och historik
+# ---------------------------------------------------------------------------
+def graf_jamfor(port: pd.Series, index: pd.Series | None, indexnamn: str) -> str:
+    """Två linjer i procent: portföljen och index, med nollinje."""
+    B, H, VM, HM, TM, BM = 860, 300, 56, 16, 14, 28
+    serier = [port] + ([index] if index is not None else [])
+    lo = min(0.0, *(float(s.min()) for s in serier))
+    hi = max(0.0, *(float(s.max()) for s in serier))
+    pad = (hi - lo) * 0.08 or 0.01
+    lo, hi = lo - pad, hi + pad
+    t0, t1 = port.index[0].value, port.index[-1].value
+    if t1 == t0:
+        return "<p class='muted'>För kort period för en graf ännu – kom tillbaka om några dagar.</p>"
+
+    def x(t):
+        return VM + (pd.Timestamp(t).value - t0) / (t1 - t0) * (B - VM - HM)
+
+    def y(v):
+        return TM + (hi - v) / (hi - lo) * (H - TM - BM)
+
+    def linje(s, farg, bredd):
+        p = [(x(i), y(v)) for i, v in s.dropna().items()]
+        if len(p) < 2:
+            return ""
+        return (f'<path d="M{" L".join(f"{a:.1f},{b:.1f}" for a, b in p)}" fill="none" stroke="{farg}" '
+                f'stroke-width="{bredd}" stroke-linejoin="round"/>')
+
+    delar = []
+    spann = hi - lo
+    steg = 10 ** math.floor(math.log10(spann / 4))
+    for m in (1, 2, 5, 10):
+        if spann / (steg * m) <= 6:
+            steg *= m
+            break
+    v = math.ceil(lo / steg) * steg
+    while v <= hi:
+        delar.append(f'<line x1="{VM}" x2="{B - HM}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
+                     f'stroke="var(--{"muted" if abs(v) < 1e-12 else "linje"})"/>'
+                     f'<text x="{VM - 8}" y="{y(v) + 4:.1f}" text-anchor="end" font-size="11" fill="var(--muted)">'
+                     f'{v * 100:+.0f} %</text>')
+        v += steg
+    dagar = (port.index[-1] - port.index[0]).days
+    frekv = "MS" if dagar > 75 else "W-MON"
+    fmt = "%b %y" if dagar > 75 else "%d %b"
+    etiketter = pd.date_range(port.index[0], port.index[-1], freq=frekv)
+    if len(etiketter) > 12:
+        etiketter = etiketter[::math.ceil(len(etiketter) / 12)]
+    for t in etiketter:
+        delar.append(f'<text x="{x(t):.1f}" y="{H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">'
+                     f'{t.strftime(fmt)}</text>')
+    if index is not None:
+        delar.append(linje(index, "var(--muted)", 1.5))
+    delar.append(linje(port, "var(--accent)", 2.2))
+    for s, farg in ([(index, "var(--muted)")] if index is not None else []) + [(port, "var(--accent)")]:
+        sista = s.dropna()
+        if len(sista):
+            delar.append(f'<circle cx="{x(sista.index[-1]):.1f}" cy="{y(sista.iloc[-1]):.1f}" r="3.5" fill="{farg}"/>')
+    return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Utveckling mot index">{"".join(delar)}</svg></div>'
+            f'<p class="small muted" style="margin:6px 0 0"><span style="color:var(--accent)">━</span> din portfölj '
+            + (f'<span style="color:var(--muted)">━</span> {html.escape(indexnamn)}' if index is not None else "")
+            + '</p>')
+
+
+PERIODER = {"allt": "Sedan start", "ar": "I år", "12m": "12 mån", "3m": "3 mån", "1m": "1 mån"}
+
+UTVECKLING_MALL = """
+<h1>Utveckling</h1>
+<p class="muted">Tidsviktad avkastning: köp och försäljningar flyttar inte kurvan, bara hur aktierna rört sig.
+Samma metod som fonder jämförs med.</p>
+
+<div class="card" style="margin:16px 0">
+<div style="display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center;margin-bottom:12px">
+<div class="small">Visa:
+{% for d, namn in delar.items() %}<a href="{{ url_for('utveckling_sida', del_=d, period=period) }}"
+ style="margin-left:8px;{{ 'font-weight:700;color:var(--text)' if d == del_ }}">{{ namn }}</a>{% endfor %}</div>
+<div class="small">{% for p, namn in perioder.items() %}<a href="{{ url_for('utveckling_sida', del_=del_, period=p) }}"
+ style="margin-left:10px;{{ 'font-weight:700;color:var(--text)' if p == period }}">{{ namn }}</a>{% endfor %}</div>
+</div>
+{% if graf %}
+<div class="stats" style="margin-top:0">
+<div class="stat"><span class="muted small">Din portfölj</span><b class="{{ port_avk|klass }}">{{ port_avk|pct }}</b></div>
+<div class="stat"><span class="muted small">{{ indexnamn }}</span><b class="{{ index_avk|klass }}">{{ index_avk|pct }}</b></div>
+<div class="stat"><span class="muted small">Mot index</span><b class="{{ skillnad|klass }}">{{ skillnad|pct }}</b>
+<span class="small muted">procentenheter</span></div>
+<div class="stat"><span class="muted small">Värde idag</span><b>{{ varde|kr }}</b></div>
+</div>
+{{ graf|safe }}
+{% if not index_finns %}<p class="small neg">Indexdata saknas ({{ indexticker }}). Klicka "Uppdatera kurser" under Mina innehav,
+eller ändra JAMFORELSEINDEX i innehav.py till ^OMX.</p>{% endif %}
+{% else %}<p class="muted">Ingen utveckling att visa ännu för "{{ delar[del_] }}". Lägg till innehav med köpdatum och köpkurs.</p>{% endif %}
+</div>
+
+<h2>Avslutade affärer</h2>
+{% if stat.antal %}
+<div class="stats" style="margin-top:0">
+<div class="stat"><span class="muted small">Affärer</span><b>{{ stat.antal }}</b></div>
+<div class="stat"><span class="muted small">Träffsäkerhet</span><b>{{ stat.traffsakerhet|pct(false) }}</b>
+<span class="small muted">{{ stat.vinnare }} med vinst</span></div>
+<div class="stat"><span class="muted small">Snittvinst</span><b class="pos">{{ stat.snittvinst|pct }}</b></div>
+<div class="stat"><span class="muted small">Snittförlust</span><b class="neg">{{ stat.snittforlust|pct }}</b></div>
+<div class="stat"><span class="muted small">Realiserat</span><b class="{{ stat.resultat_sek|klass }}">{{ stat.resultat_sek|kr }}</b></div>
+<div class="stat"><span class="muted small">Snitt ägd</span><b>{{ stat.snitt_dagar|tal(0) }} dagar</b></div>
+</div>
+<div class="wrap"><table style="min-width:960px">
+<thead><tr><th>Aktie</th><th>Typ</th><th>Köpt</th><th>Sålt</th><th class="num">Dagar</th><th class="num">Antal</th>
+<th class="num">Köpkurs</th><th class="num">Säljkurs</th><th class="num">Resultat</th><th class="num">Resultat kr</th>
+<th>Orsak</th><th></th></tr></thead><tbody>
+{% for a in affarer %}<tr>
+<td><a href="{{ url_for('aktie', ticker=a.ticker) }}"><b>{{ a.ticker|kort }}</b></a></td><td class="small">{{ a.typ }}</td>
+<td class="small">{{ a.kopdatum|datum }}</td><td class="small">{{ a.saljdatum|datum }}</td><td class="num">{{ a.dagar }}</td>
+<td class="num">{{ a.antal|tal(0) }}</td><td class="num">{{ a.kopkurs|tal }}</td><td class="num">{{ a.saljkurs|tal }} <span class="muted small">{{ a.valuta }}</span></td>
+<td class="num {{ a.r|klass }}">{{ a.r|pct }}</td><td class="num {{ a.resultat_sek|klass }}">{{ a.resultat_sek|kr }}</td>
+<td class="small">{{ a.orsak }}</td>
+<td><form method="post" action="{{ url_for('ta_bort_affar', idx=a.idx) }}" onsubmit="return confirm('Ta bort affären? Använd bara för felinmatningar.')">
+<button class="lank" type="submit">Ta bort</button></form></td>
+</tr>{% endfor %}</tbody></table></div>
+{% else %}<div class="card muted">Inga avslutade affärer ännu för "{{ delar[del_] }}". Använd <b>Sälj</b> under Mina innehav när du säljer.</div>{% endif %}
+"""
+
+
+def _periodstart(period: str, sista: pd.Timestamp) -> pd.Timestamp | None:
+    return {"ar": pd.Timestamp(sista.year, 1, 1), "12m": sista - pd.DateOffset(months=12),
+            "3m": sista - pd.DateOffset(months=3), "1m": sista - pd.DateOffset(months=1)}.get(period)
+
+
+@app.route("/utveckling")
+def utveckling_sida():
+    inn = ih.las_innehav(INNEHAV_FIL)
+    aff = ih.las_affarer(AFFAR_FIL)
+    k = kurser()
+    har_mom = (inn["typ"] == "momentum").any() or (aff["typ"] == "momentum").any()
+    delar = {"momentum": "Momentum", "alla": "Hela portföljen", "kärna": "Kärna"}
+    del_ = request.args.get("del_") or ("momentum" if har_mom else "alla")
+    del_ = del_ if del_ in delar else "alla"
+    period = request.args.get("period", "allt")
+    period = period if period in PERIODER else "allt"
+    typer = None if del_ == "alla" else [del_]
+
+    u = ih.utveckling(inn, aff, k, typer)
+    graf = None
+    port_avk = index_avk = skillnad = varde = None
+    index_finns = ih.JAMFORELSEINDEX in k.columns and k[ih.JAMFORELSEINDEX].notna().any()
+    if len(u) >= 1:
+        ps = _periodstart(period, u.index[-1])
+        if ps is not None and ps > u.index[0]:
+            fore = u[u.index < ps]
+            bas = 1 + (fore["avkastning"].iloc[-1] if len(fore) else 0.0)
+            u = u[u.index >= ps].copy()
+            u["avkastning"] = (1 + u["avkastning"]) / bas - 1
+        if len(u):
+            idx = ih.indexutveckling(k, u.index) if index_finns else None
+            port_avk = float(u["avkastning"].iloc[-1])
+            index_avk = float(idx.iloc[-1]) if idx is not None and pd.notna(idx.iloc[-1]) else None
+            skillnad = port_avk - index_avk if index_avk is not None else None
+            varde = float(u["varde_sek"].iloc[-1])
+            graf = graf_jamfor(u["avkastning"], idx, ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX))
+
+    vis = aff.copy()
+    vis["idx"] = range(len(vis))
+    if typer:
+        vis = vis[vis["typ"].isin(typer)]
+    stat = ih.affarsstatistik(vis)
+    rader = []
+    for a in vis.sort_values("saljdatum", ascending=False).to_dict("records"):
+        a["r"] = a["saljkurs"] / a["kopkurs"] - 1 if a["kopkurs"] else None
+        a["dagar"] = (a["saljdatum"] - a["kopdatum"]).days if pd.notna(a["kopdatum"]) and pd.notna(a["saljdatum"]) else ""
+        rader.append(a)
+    return sida("Utveckling", "utveckling", UTVECKLING_MALL, delar=delar, del_=del_, period=period,
+                perioder=PERIODER, graf=graf, port_avk=port_avk, index_avk=index_avk, skillnad=skillnad,
+                varde=varde, index_finns=index_finns, indexticker=ih.JAMFORELSEINDEX,
+                indexnamn=ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX), stat=stat, affarer=rader)
+
+
+@app.route("/utveckling/ta-bort/<int:idx>", methods=["POST"])
+def ta_bort_affar(idx: int):
+    aff = ih.las_affarer(AFFAR_FIL)
+    if 0 <= idx < len(aff):
+        t = aff.iloc[idx]["ticker"]
+        ih.skriv_affarer(AFFAR_FIL, aff.drop(index=idx).reset_index(drop=True))
+        flash(f"Affären i {t} borttagen.", "ok")
+    return redirect(url_for("utveckling_sida"))
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +776,7 @@ def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
     delar.append(linje(ma200, "var(--orange)", 1.5))
     delar.append(linje(ma50, "var(--gul)", 1.5))
     delar.append(linje(s, "var(--accent)", 2))
-    return (f'<svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Kursgraf">{"".join(delar)}</svg>'
+    return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Kursgraf">{"".join(delar)}</svg></div>'
             '<p class="small muted" style="margin:6px 0 0"><span style="color:var(--accent)">━</span> kurs '
             '<span style="color:var(--gul)">━</span> MA50 <span style="color:var(--orange)">━</span> MA200 '
             '<span style="color:var(--pos)">┅</span> köpkurs <span style="color:var(--neg)">┅</span> stopp</p>')
