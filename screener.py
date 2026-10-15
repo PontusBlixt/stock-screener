@@ -231,6 +231,73 @@ def filtrera_och_ranka(tabell: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# BEDÖMNING AV EN ENSKILD AKTIE (används av sökfunktionen på webbsidan)
+# ---------------------------------------------------------------------------
+def bedom_en(ticker: str, n: dict, tabell: pd.DataFrame | None, salj_rank: int = 40) -> dict:
+    """Kör köpreglerna på en aktie och räknar ut vilken plats den skulle få i
+    senaste veckorankningen. n = berakna_nyckeltal(), med omsattning_sek i kronor.
+
+    Returnerar en dict med 'beslut' (KÖPLÄGE / BEVAKA / INTE KÖPLÄGE),
+    'regler' [(status, regel, förklaring)] och rankningen."""
+    K = KONFIG
+    regler = []
+
+    def regel(ok, namn, txt, bevaka=False):
+        regler.append(("ok" if ok else "bevaka" if bevaka else "brutet", namn, txt))
+        return ok
+
+    # 1. Screenerns filter (samma som stoppar en aktie från rankningen)
+    f_oms = regel(n["omsattning_sek"] >= K["min_omsattning_sek"], "Omsättning",
+                  f"{n['omsattning_sek'] / 1e6:.1f} MSEK/dag (krav {K['min_omsattning_sek'] / 1e6:.0f})")
+    f_ma200 = regel(not K["krav_over_ma200"] or n["over_ma200"], "Över MA200",
+                    f"{n['avstand_ma200'] * 100:+.1f} % (MA200 {n['ma200']:.2f})")
+    f_kors = regel(not K["krav_ma50_over_ma200"] or n["ma50_over_ma200"], "MA50 över MA200",
+                   f"MA50 {n['ma50']:.2f} · MA200 {n['ma200']:.2f}")
+    godkand = f_oms and f_ma200 and f_kors
+
+    # 2. Plats i rankningen, räknad mot senaste veckans godkända aktier
+    plats = poang = None
+    n_godk = 0
+    if godkand and tabell is not None and len(tabell):
+        ovriga = tabell[tabell["godkand"].astype(bool) & (tabell["ticker"] != ticker)]
+        n_godk = len(ovriga) + 1
+        m12 = pd.concat([ovriga["mom_12_1"], pd.Series([n["mom_12_1"]])], ignore_index=True)
+        m6 = pd.concat([ovriga["mom_6m"], pd.Series([n["mom_6m"]])], ignore_index=True)
+        p = 100 * (K["vikt_mom_12_1"] * m12.rank(pct=True) + K["vikt_mom_6m"] * m6.rank(pct=True))
+        poang = float(p.iloc[-1])
+        ovr = p.iloc[:-1].to_numpy()
+        # Lika poäng: samma ordning som i veckorapporten; en aktie som inte fanns där hamnar efter.
+        egen = tabell.loc[tabell["ticker"] == ticker, "plats"]
+        egen_plats = float(egen.iloc[0]) if len(egen) and pd.notna(egen.iloc[0]) else np.inf
+        fore = ovriga["plats"].to_numpy(dtype=float) < egen_plats
+        plats = int((ovr > poang).sum() + ((ovr == poang) & fore).sum()) + 1
+        regel(plats <= K["topp_n"], f"Topp {K['topp_n']} i rankningen",
+              f"plats {plats} av {n_godk} (poäng {poang:.0f})", bevaka=plats <= salj_rank)
+    elif godkand:
+        regler.append(("na", f"Topp {K['topp_n']} i rankningen", "ingen veckorapport att jämföra med ännu"))
+    else:
+        regler.append(("na", f"Topp {K['topp_n']} i rankningen", "rankas inte – klarar inte filtren ovan"))
+
+    # 3. Urvalsreglerna
+    u1 = regel(n["mom_1m"] <= K["urval_max_1m"], "Inte uttänjd",
+               f"1 mån {n['mom_1m'] * 100:+.1f} % (max +{K['urval_max_1m'] * 100:.0f} %)", bevaka=True)
+    u2 = regel(n["omsattning_sek"] >= K["urval_min_omsattning_sek"], "Likviditet för urval",
+               f"{n['omsattning_sek'] / 1e6:.1f} MSEK/dag (krav {K['urval_min_omsattning_sek'] / 1e6:.0f})", bevaka=True)
+    u3 = regel(n["volatilitet"] <= K["urval_max_volatilitet"], "Volatilitet",
+               f"{n['volatilitet'] * 100:.0f} % (max {K['urval_max_volatilitet'] * 100:.0f} %)", bevaka=True)
+    urval = u1 and u2 and u3
+
+    if not godkand or (plats is not None and plats > salj_rank):
+        beslut = "INTE KÖPLÄGE"
+    elif plats is not None and plats <= K["topp_n"] and urval:
+        beslut = "KÖPLÄGE"
+    else:
+        beslut = "BEVAKA"
+    return {"beslut": beslut, "regler": regler, "godkand": godkand, "urval": urval,
+            "plats": plats, "poang": poang, "n_godkanda": n_godk}
+
+
+# ---------------------------------------------------------------------------
 # HISTORIK (tidigare körningar i utmappen)
 # ---------------------------------------------------------------------------
 def tidigare_korningar(utmapp: Path, idag: str) -> list[Path]:
