@@ -1,0 +1,6 @@
+ticker,typ,kopdatum,kopkurs,antal,valuta,notering
+TEL2-B.ST,momentum,2026-07-23,162.71,122.0,SEK,
+AXFO.ST,momentum,2026-05-14,274.3,75.0,SEK,
+SEB-A.ST,momentum,2026-02-12,191.82,115.0,SEK,
+SWED-A.ST,kärna,2026-01-14,288.98,115.0,SEK,
+SAAB-B.ST,momentum,2026-05-20,523.52,27.0,SEK,

@@ -222,6 +222,7 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 <a href="{{ url_for('rapport') }}" class="{{ 'aktiv' if sida=='rapport' }}">Veckans rapport</a>
 <a href="{{ url_for('innehav_sida') }}" class="{{ 'aktiv' if sida=='innehav' }}">Mina innehav</a>
 <a href="{{ url_for('utveckling_sida') }}" class="{{ 'aktiv' if sida=='utveckling' }}">Utveckling</a>
+<a href="{{ url_for('sok_sida') }}" class="{{ 'aktiv' if sida=='sok' }}">Sök</a>
 <a href="{{ url_for('arkiv') }}" class="{{ 'aktiv' if sida=='arkiv' }}">Arkiv</a></div></nav>
 <main>
 {% with meddelanden = get_flashed_messages(with_categories=true) %}{% for kat, m in meddelanden %}
@@ -242,7 +243,7 @@ def sida(titel: str, flik: str, mall: str, **kw) -> str:
 NAV_INJEKTION = """<nav style="background:var(--kort);border-bottom:1px solid var(--linje)">
 <div style="max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;gap:20px;flex-wrap:wrap">
 <b>📈 Screener</b><a href="/" style="color:var(--text);font-weight:600;text-decoration:none">Veckans rapport</a>
-<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
+<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/sok" style="color:var(--accent);text-decoration:none">Sök</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
 
 LANK_SKRIPT = """<script>
 document.querySelectorAll('[data-t]').forEach(function(el){
@@ -342,10 +343,10 @@ Kurser från {{ kursdatum or '–' }}.</p>
 <span class="small muted">Läser in alla köp och försäljningar från Avanzas exportfil – rekommenderat i stället för att mata in för hand.</span></div>
 <a href="{{ url_for('import_sida') }}"><button type="button">Importera transaktioner</button></a>
 </div>
-<div class="card" style="grid-column:1/-1">
+<div class="card" style="grid-column:1/-1" id="lagg-till">
 <h2>Lägg till innehav</h2>
 <form class="rad" method="post" action="{{ url_for('lagg_till') }}">
-<label>Ticker<input name="ticker" required placeholder="VOLV-B.ST eller ADCT"></label>
+<label>Ticker<input name="ticker" required placeholder="VOLV-B.ST eller ADCT" value="{{ request.args.get('ticker', '') }}"></label>
 <label>Typ<select name="typ">{% for t in typer %}<option>{{ t }}</option>{% endfor %}</select></label>
 <label>Köpdatum<input type="date" name="kopdatum" value="{{ idag }}" required></label>
 <label>Köpkurs<input name="kopkurs" required inputmode="decimal" placeholder="123,45"></label>
@@ -980,8 +981,10 @@ def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
     delar.append(linje(s, "var(--accent)", 2))
     return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Kursgraf">{"".join(delar)}</svg></div>'
             '<p class="small muted" style="margin:6px 0 0"><span style="color:var(--accent)">━</span> kurs '
-            '<span style="color:var(--gul)">━</span> MA50 <span style="color:var(--orange)">━</span> MA200 '
-            '<span style="color:var(--pos)">┅</span> köpkurs <span style="color:var(--neg)">┅</span> stopp</p>')
+            '<span style="color:var(--gul)">━</span> MA50 <span style="color:var(--orange)">━</span> MA200'
+            + (' <span style="color:var(--pos)">┅</span> köpkurs' if kopkurs is not None and pd.notna(kopkurs) else '')
+            + (' <span style="color:var(--neg)">┅</span> stopp' if stopp is not None and pd.notna(stopp) else '')
+            + '</p>')
 
 
 def regelstatus(a: dict) -> list[tuple[str, str, str]]:
@@ -1067,8 +1070,7 @@ def aktie(ticker: str):
     ticker = ticker.upper()
     k = kurser()
     if ticker not in k.columns or k[ticker].dropna().empty:
-        flash(f"Ingen kursdata för {ticker}.", "fel")
-        return redirect(url_for("innehav_sida"))
+        return redirect(url_for("sok_sida", q=ticker))
     s = k[ticker].dropna()
 
     df, analys = analysera_allt()
@@ -1093,6 +1095,219 @@ def aktie(ticker: str):
                     forsta["stopp"] if forsta and forsta["typ"] == "momentum" else None)
     return sida(ticker, "innehav", AKTIE_MALL, ticker=ticker, namn=namn_for(ticker), sista=s.iloc[-1],
                 datum=s.index[-1].date(), graf=graf, poster=poster, m=m, s=srad, n_godk=n_godk)
+
+
+# ---------------------------------------------------------------------------
+# Sök: kör köpreglerna på valfri aktie
+# ---------------------------------------------------------------------------
+SOK_HISTORIK = UTMAPP / ".sok_historik.json"
+_tickerlista_cache: dict = {"mtime": None, "df": None}
+
+
+def tickerlista() -> pd.DataFrame:
+    fil = sc.MAPP / "tickers_se.csv"
+    if not fil.exists():
+        return pd.DataFrame(columns=["ticker", "namn"])
+    m = fil.stat().st_mtime
+    if _tickerlista_cache["mtime"] != m:
+        _tickerlista_cache["df"] = sc.las_tickers(fil)
+        _tickerlista_cache["mtime"] = m
+    return _tickerlista_cache["df"]
+
+
+def tolka_sokning(q: str) -> tuple[str | None, list[tuple[str, str]]]:
+    """Gör om det du skrev till en Yahoo-ticker. Returnerar (ticker, förslag vid flera träffar)."""
+    q = q.strip()
+    if not q:
+        return None, []
+    lista = tickerlista()
+    stor = q.upper()
+    norm = re.sub(r"\s+", "-", stor)
+    tickers = set(lista["ticker"])
+    for kand in (norm, norm + ".ST", norm.replace(".ST", "") + ".ST"):
+        if kand in tickers:
+            return kand, []
+    # Namnsökning i den svenska listan
+    if len(q) >= 2 and len(lista):
+        t = lista[lista["namn"].str.upper().str.contains(re.escape(stor), na=False)
+                  | lista["ticker"].str.upper().str.startswith(norm)]
+        if len(t) == 1:
+            return t.iloc[0]["ticker"], []
+        if len(t) > 1:
+            return None, list(zip(t["ticker"], t["namn"]))[:15]
+    # Annars: ta tickern som den är (t.ex. amerikanska aktier som ADCT eller ^OMX)
+    if re.fullmatch(r"[A-Z0-9.\-=^]{1,20}", norm):
+        return norm, []
+    return None, []
+
+
+def spara_sokning(ticker: str, beslut: str) -> None:
+    try:
+        hist = json.loads(SOK_HISTORIK.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        hist = []
+    hist = [h for h in hist if h.get("ticker") != ticker]
+    hist.insert(0, {"ticker": ticker, "beslut": beslut, "tid": dt.datetime.now().strftime("%Y-%m-%d %H:%M")})
+    try:
+        SOK_HISTORIK.write_text(json.dumps(hist[:12], ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def las_sokhistorik() -> list[dict]:
+    try:
+        return json.loads(SOK_HISTORIK.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+SOK_MALL = """
+<h1>Sök</h1>
+<p class="muted">Hämtar färska kurser och kör samma köpregler som screenern. Platsen räknas mot senaste veckorapporten
+{%- if rapportdatum %} ({{ rapportdatum }}){% endif %}.</p>
+
+<form method="get" class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:16px">
+<label style="flex:1;min-width:220px">Ticker eller bolagsnamn
+<input name="q" value="{{ q }}" list="tickers" autofocus placeholder="t.ex. Volvo, VOLV-B.ST, ADCT"></label>
+<datalist id="tickers">{% for t, n in alla %}<option value="{{ t }}">{{ n }}</option>{% endfor %}</datalist>
+<button type="submit">Analysera</button>
+</form>
+
+{% if forslag %}
+<div class="card"><h2>Flera träffar – välj en</h2>
+<ul>{% for t, n in forslag %}<li><a href="{{ url_for('sok_sida', q=t) }}"><b>{{ t|kort }}</b></a> <span class="muted">{{ n }}</span></li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if fel %}<div class="flash fel">{{ fel }}</div>{% endif %}
+
+{% if r %}
+<div class="card" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+<div><h2 style="margin:0;font-size:22px">{{ r.ticker|kort }} <span class="muted" style="font-weight:400">{{ r.namn }}</span></h2>
+<div class="muted small">Kurs {{ r.n.kurs|tal }} {{ r.valuta }} · {{ r.n.datum }}{% if r.agd %} · <a href="{{ url_for('aktie', ticker=r.ticker) }}">du äger den – se säljreglerna</a>{% endif %}</div></div>
+<div style="text-align:right"><span class="badge {{ r.klass }}" style="font-size:16px;padding:6px 14px">{{ r.b.beslut }}</span>
+<div class="small muted" style="margin-top:6px">{{ r.forklaring }}</div></div>
+</div>
+
+<div class="card">{{ r.graf|safe }}</div>
+
+<div class="grid">
+<div class="card"><h2>Köpreglerna</h2>
+<ul class="regler">{% for st, regel, txt in r.b.regler %}
+<li><span class="prick p-{{ st }}"></span><div><b>{{ regel }}</b><div class="small muted">{{ txt }}</div></div></li>{% endfor %}
+</ul></div>
+<div class="card"><h2>Nyckeltal</h2>
+<dl class="nyckel">
+<dt>12 mån exkl. senaste</dt><dd class="{{ r.n.mom_12_1|klass }}">{{ r.n.mom_12_1|pct }}</dd>
+<dt>6 mån</dt><dd class="{{ r.n.mom_6m|klass }}">{{ r.n.mom_6m|pct }}</dd>
+<dt>3 mån</dt><dd class="{{ r.n.mom_3m|klass }}">{{ r.n.mom_3m|pct }}</dd>
+<dt>1 mån</dt><dd class="{{ r.n.mom_1m|klass }}">{{ r.n.mom_1m|pct }}</dd>
+<dt>Från 52v-högsta</dt><dd class="{{ r.n.fran_52v_hogsta|klass }}">{{ r.n.fran_52v_hogsta|pct }}</dd>
+<dt>Volatilitet (3 mån, årlig)</dt><dd>{{ r.n.volatilitet|pct(false) }}</dd>
+<dt>Omsättning/dag</dt><dd>{{ (r.n.omsattning_sek / 1e6)|tal(1) }} MSEK</dd>
+{% if r.veckoplats %}<dt>Plats i veckorapporten</dt><dd>{{ r.veckoplats }}</dd>{% endif %}
+</dl></div>
+<div class="card"><h2>Om du köper idag</h2>
+<dl class="nyckel">
+<dt>Släpande stopp startar på</dt><dd>{{ r.stopp|tal }} {{ r.valuta }}</dd>
+<dt>Avstånd till MA200</dt><dd>{{ r.n.avstand_ma200|pct }}</dd>
+<dt>Sälj vid månadsgenomgång om</dt><dd>plats > {{ salj_rank }}</dd>
+</dl>
+<p class="small muted">Stoppen flyttas upp när kursen stiger, {{ (stopp_pct * 100)|round|int }} % under högsta stängning sedan köp.</p>
+{% if not r.agd %}<a href="{{ url_for('innehav_sida', ticker=r.ticker) }}#lagg-till" class="small">Lägg till som innehav →</a>{% endif %}
+</div>
+</div>
+<p class="small muted">Kontrollera alltid nyheter och kommande rapportdatum innan köp. Regler tillämpade på kursdata, inte en köprekommendation.</p>
+{% endif %}
+
+{% if historik and not r %}
+<div class="card" style="margin-top:16px"><h2>Senaste sökningar</h2>
+<table><tbody>{% for h in historik %}
+<tr><td style="white-space:nowrap"><a href="{{ url_for('sok_sida', q=h.ticker) }}"><b>{{ h.ticker|kort }}</b></a></td>
+<td><span class="badge {{ klass_for(h.beslut) }}">{{ h.beslut }}</span></td><td class="small muted num">{{ h.tid }}</td></tr>
+{% endfor %}</tbody></table></div>
+{% endif %}
+"""
+
+BESLUT_SOK = {"KÖPLÄGE": "behall", "BEVAKA": "bevaka", "INTE KÖPLÄGE": "salj"}
+
+
+def _forklara(b: dict) -> str:
+    K = sc.KONFIG
+    if b["beslut"] == "KÖPLÄGE":
+        return f"Klarar filtren, topp {K['topp_n']} och urvalsreglerna."
+    if b["beslut"] == "BEVAKA":
+        if b["plats"] and b["plats"] > K["topp_n"]:
+            return f"Godkänd men plats {b['plats']} – inte topp {K['topp_n']} ännu."
+        if not b["urval"]:
+            return "Topp " + str(K["topp_n"]) + " men bryter en urvalsregel."
+        return "Klarar filtren – rankning saknas."
+    if not b["godkand"]:
+        return "Klarar inte trend- eller omsättningsfiltret."
+    return f"Plats {b['plats']} – utanför topp {ih.REGLER['SALJ_RANK']}."
+
+
+@app.route("/sok")
+def sok_sida():
+    q = request.args.get("q", "").strip()
+    lista = tickerlista()
+    alla = list(zip(lista["ticker"], lista["namn"]))
+    kw = dict(q=q, alla=alla, forslag=[], fel=None, r=None, historik=las_sokhistorik(),
+              salj_rank=ih.REGLER["SALJ_RANK"], stopp_pct=ih.REGLER["STOPP_PROCENT"],
+              klass_for=lambda b: BESLUT_SOK.get(b, "info"), rapportdatum=None)
+    st = screener_tabell()
+    filer = sorted(UTMAPP.glob("screener_*.csv"))
+    if filer:
+        kw["rapportdatum"] = filer[-1].stem.removeprefix("screener_")
+    if not q:
+        return sida("Sök", "sok", SOK_MALL, **kw)
+
+    ticker, forslag = tolka_sokning(q)
+    if forslag:
+        kw["forslag"] = forslag
+        return sida("Sök", "sok", SOK_MALL, **kw)
+    if not ticker:
+        kw["fel"] = f"Hittade ingen aktie som matchar \"{q}\"."
+        return sida("Sök", "sok", SOK_MALL, **kw)
+
+    valuta = ih.gissa_valuta(ticker)
+    fxt = ih.fx_ticker(valuta)
+    try:
+        hamtat = (sc.demodata([ticker] + ([fxt] if fxt else []), seed=len(ticker)) if DEMO
+                  else sc.hamta_kurser([ticker] + ([fxt] if fxt else []), "2y"))
+    except Exception as e:
+        kw["fel"] = f"Kunde inte hämta kurser: {e}"
+        return sida("Sök", "sok", SOK_MALL, **kw)
+    if ticker not in hamtat:
+        tips = " Svenska aktier slutar på .ST, t.ex. VOLV-B.ST." if "." not in ticker else ""
+        kw["fel"] = f"Yahoo har ingen kursdata för {ticker}.{tips}"
+        return sida("Sök", "sok", SOK_MALL, **kw)
+
+    df = hamtat[ticker]
+    n = sc.berakna_nyckeltal(df)
+    if n is None:
+        kw["fel"] = (f"{ticker} har bara {len(df)} handelsdagar. Momentum kräver minst ett års historik "
+                     f"({sc.KONFIG['min_dagar']} dagar), så den kan inte bedömas ännu.")
+        return sida("Sök", "sok", SOK_MALL, **kw)
+    if fxt:  # omsättningen räknas om till kronor
+        fx = float(hamtat[fxt]["Close"].dropna().iloc[-1]) if fxt in hamtat else np.nan
+        n["omsattning_sek"] = n["omsattning_sek"] * fx if pd.notna(fx) else n["omsattning_sek"]
+
+    b = sc.bedom_en(ticker, n, st, ih.REGLER["SALJ_RANK"])
+    veckoplats = None
+    if st is not None:
+        rad = st[st["ticker"] == ticker]
+        if len(rad):
+            r0 = rad.iloc[0]
+            veckoplats = (f"{int(r0['plats'])} av {int(st['godkand'].sum())}" if pd.notna(r0.get("plats"))
+                          else "ej godkänd")
+    namn = dict(alla).get(ticker, "") or namn_for(ticker)
+    agd = ticker in set(ih.las_innehav(INNEHAV_FIL)["ticker"])
+    stopp = n["kurs"] * (1 - ih.REGLER["STOPP_PROCENT"])
+    spara_sokning(ticker, b["beslut"])
+    kw["r"] = {"ticker": ticker, "namn": namn, "valuta": valuta, "n": n, "b": b, "agd": agd,
+               "klass": BESLUT_SOK[b["beslut"]], "forklaring": _forklara(b), "veckoplats": veckoplats,
+               "stopp": stopp, "graf": graf_svg(df["Close"], stopp=stopp)}
+    return sida(f"Sök {ticker}", "sok", SOK_MALL, **kw)
 
 
 if __name__ == "__main__":

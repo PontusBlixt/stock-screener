@@ -1,0 +1,25 @@
+ticker,typ,kopdatum,kopkurs,saljdatum,saljkurs,antal,valuta,fx_kop,fx_salj,resultat_sek,orsak,notering
+BESQAB-PREF-B.ST,momentum,2025-12-05,98,2026-07-22,99.65027397,1,SEK,1,1,1.650273973,import från Avanza,Besqab Pref B
+BESQAB-PREF-B.ST,momentum,2026-03-04,100,2026-07-22,99.65027397,1,SEK,1,1,-0.3497260274,import från Avanza,Besqab Pref B
+BESQAB-PREF-B.ST,momentum,2026-05-07,100.3333333,2026-07-22,99.65027397,3,SEK,1,1,-2.049178082,import från Avanza,Besqab Pref B
+BESQAB-PREF-B.ST,momentum,2026-06-08,99.53333333,2026-07-22,99.65027397,3,SEK,1,1,0.3508219178,import från Avanza,Besqab Pref B
+BESQAB-PREF-B.ST,momentum,2026-06-25,100.1,2026-07-22,99.65027397,2,SEK,1,1,-0.8994520548,import från Avanza,Besqab Pref B
+HEXA-B.ST,momentum,2026-01-09,108.1196739,2026-05-11,93.94456522,92,SEK,1,1,-1304.11,import från Avanza,Hexagon B
+SEB-A.ST,momentum,2026-02-03,200.0088,2026-05-11,179.9489091,55,SEK,1,1,-1103.294,import från Avanza,SEB A
+AXFO.ST,momentum,2026-05-11,278.8954545,2026-10-13,258.8,66,SEK,1,1,-1326.3,import från Avanza,Axfood
+AXFO.ST,momentum,2026-07-27,238.595,2026-10-13,258.8,8,SEK,1,1,161.64,import från Avanza,Axfood
+AXFO.ST,momentum,2026-09-23,257,2026-10-13,258.8,1,SEK,1,1,1.8,import från Avanza,Axfood
+SAAB-B.ST,momentum,2026-06-12,536.8389286,2026-07-23,596.505,14,SEK,1,1,835.325,import från Avanza,SAAB B
+SAAB-B.ST,momentum,2026-06-12,536.8389286,2026-10-13,598.9,14,SEK,1,1,868.855,import från Avanza,SAAB B
+SAAB-B.ST,momentum,2026-06-24,503.455,2026-10-13,598.9,2,SEK,1,1,190.89,import från Avanza,SAAB B
+SAAB-B.ST,momentum,2026-06-25,491.575,2026-10-13,598.9,4,SEK,1,1,429.3,import från Avanza,SAAB B
+SAAB-B.ST,momentum,2026-06-25,494.2328571,2026-10-13,598.9,7,SEK,1,1,732.67,import från Avanza,SAAB B
+TEL2-B.ST,momentum,2026-07-22,160.8011111,2026-10-13,152,45,SEK,1,1,-396.05,import från Avanza,Tele2 B
+TEL2-B.ST,momentum,2026-07-23,161.2019231,2026-10-13,152,52,SEK,1,1,-478.5,import från Avanza,Tele2 B
+TEL2-B.ST,momentum,2026-08-26,170.8258333,2026-10-13,152,12,SEK,1,1,-225.91,import från Avanza,Tele2 B
+TEL2-B.ST,momentum,2026-09-28,168.52,2026-10-13,152,12,SEK,1,1,-198.24,import från Avanza,Tele2 B
+TEL2-B.ST,momentum,2026-10-09,159.55,2026-10-13,152,1,SEK,1,1,-7.55,import från Avanza,Tele2 B
+US36257Y1091.SG,momentum,2026-10-12,2.827047786,2026-10-12,2.847875348,193,USD,10.067772,10.017558,12.87,import från Avanza,Gaotu Techedu ADR
+BFRG,momentum,2026-10-12,0.6296129869,2026-10-12,0.5869893641,50,USD,10.067772,10.017558,-22.93,import från Avanza,Bullfrog AI
+ADCT,momentum,2026-10-12,1.764411794,2026-10-12,1.765592519,322,USD,10.067772,10.017558,-24.72,import från Avanza,ADC Therapeutics SA
+FRVO,momentum,2026-10-12,13.83453513,2026-10-12,13.17698014,86,USD,10.022895,10.017558,-572.84,import från Avanza,Fervo Energy

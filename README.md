@@ -82,6 +82,7 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 - **Mina innehav** – lägg till ett köp (ticker, typ, datum, kurs, antal) eller ta bort ett. Kurserna hämtas direkt när du lägger till, och knappen *Uppdatera kurser* hämtar dagens kurser. Rankningen uppdateras bara vid veckokörningen.
 - **Aktiesida** – kursgraf med MA50, MA200, köpkurs och stoppnivå, nyckeltal och status för varje säljregel.
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
+- **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
 - **Arkiv** – tidigare veckorapporter, även som .md.
 
 ### Importera från Avanza
