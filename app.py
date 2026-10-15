@@ -791,6 +791,23 @@ En säkerhetskopia sparas först. Dina val av ticker och typ sparas till nästa 
 """
 
 
+BACKUP_MAPP = UTMAPP / "backup"
+BEHALL_BACKUPER = 10  # antal säkerhetskopior per fil som sparas
+
+
+def sakerhetskopiera() -> None:
+    """Kopierar innehav.csv och affarer.csv till backup/ och behåller bara de senaste."""
+    BACKUP_MAPP.mkdir(exist_ok=True)
+    stampel = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for fil in (INNEHAV_FIL, AFFAR_FIL):
+        if not fil.exists():
+            continue
+        (BACKUP_MAPP / f"{fil.stem}_fore_import_{stampel}.csv").write_bytes(fil.read_bytes())
+        gamla = sorted(BACKUP_MAPP.glob(f"{fil.stem}_fore_import_*.csv"))[:-BEHALL_BACKUPER]
+        for g in gamla:
+            g.unlink(missing_ok=True)
+
+
 def _import_installningar() -> dict:
     try:
         return json.loads(IMPORT_INST.read_text(encoding="utf-8"))
@@ -880,10 +897,7 @@ def import_bekrafta():
     inn, aff, varningar = ai.bygg(t, val)
 
     # Säkerhetskopia, sedan skriv
-    stampel = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    for fil in (INNEHAV_FIL, AFFAR_FIL):
-        if fil.exists():
-            fil.with_name(f"{fil.stem}_fore_import_{stampel}.csv").write_bytes(fil.read_bytes())
+    sakerhetskopiera()
     ih.skriv_affarer(AFFAR_FIL, aff)
     ih.skriv_innehav(INNEHAV_FIL, inn)
 
@@ -907,7 +921,7 @@ def import_bekrafta():
     IMPORT_FIL.unlink(missing_ok=True)
 
     flash(f"Importerade {len(inn)} köp som du fortfarande äger och {len(aff)} avslutade affärer. "
-          f"Tidigare innehav sparades som säkerhetskopia.", "ok")
+          f"Tidigare innehav sparades i backup/.", "ok")
     if saknas:
         flash("Ingen kursdata för: " + ", ".join(saknas) + ". Kontrollera tickern via en ny import.", "fel")
     for v in varningar:
@@ -1260,7 +1274,18 @@ def sok_sida():
         kw["rapportdatum"] = filer[-1].stem.removeprefix("screener_")
     if not q:
         return sida("Sök", "sok", SOK_MALL, **kw)
+    try:
+        return _sok(q, st, alla, kw)
+    except Exception as e:  # visa felet på sidan i stället för "Internal Server Error"
+        import traceback
+        app.logger.error("Sökning '%s' misslyckades:\n%s", q, traceback.format_exc())
+        kw["fel"] = (f"Något gick fel vid analysen av \"{q}\": {type(e).__name__}: {e}. "
+                     "Detaljer finns i journalctl -u screener-web.")
+        kw["r"] = None
+        return sida("Sök", "sok", SOK_MALL, **kw)
 
+
+def _sok(q: str, st, alla, kw):
     ticker, forslag = tolka_sokning(q)
     if forslag:
         kw["forslag"] = forslag
@@ -1294,12 +1319,12 @@ def sok_sida():
 
     b = sc.bedom_en(ticker, n, st, ih.REGLER["SALJ_RANK"])
     veckoplats = None
-    if st is not None:
+    if st is not None and "plats" in st.columns:
         rad = st[st["ticker"] == ticker]
         if len(rad):
-            r0 = rad.iloc[0]
-            veckoplats = (f"{int(r0['plats'])} av {int(st['godkand'].sum())}" if pd.notna(r0.get("plats"))
-                          else "ej godkänd")
+            p0 = pd.to_numeric(pd.Series([rad.iloc[0].get("plats")]), errors="coerce").iloc[0]
+            godk = st["godkand"].astype(str).str.lower().isin(["true", "1"]).sum()
+            veckoplats = f"{int(p0)} av {int(godk)}" if pd.notna(p0) else "ej godkänd"
     namn = dict(alla).get(ticker, "") or namn_for(ticker)
     agd = ticker in set(ih.las_innehav(INNEHAV_FIL)["ticker"])
     stopp = n["kurs"] * (1 - ih.REGLER["STOPP_PROCENT"])

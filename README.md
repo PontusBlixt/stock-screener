@@ -27,36 +27,56 @@ Rapporten visar också vilka som är **nya** på topplistan och vilka som **fall
 
 ## Installation på hemmaservern (Ubuntu)
 
-```bash
-mkdir -p ~/screener && cd ~/screener
-# Kopiera hit: screener.py, innehav.py, app.py, avanza_import.py, uppdatera_tickers.py, tickers_se.csv
+Koden och datan ligger i två olika mappar – blanda inte ihop dem:
 
+| | Sökväg | Innehåll |
+|---|---|---|
+| **Kodmappen** | `~/screener` | `.py`-filerna, `tickers_se.csv`, `venv/`. Det här är git-repot. |
+| **Datamappen** | `/srv/storage/screener` (standard) | Dina innehav, affärer, rapporter, kurser och nyckeltal. Ingen kod här. |
+
+Datamappens sökväg ändras med `utmapp` i `KONFIG` i `screener.py` och med `SCREENER_UTMAPP` i `screener-web.service`. Båda måste peka på samma mapp.
+
+```bash
+# 1. Koden
+git clone git@github.com:<användare>/stock-screener.git ~/screener
+cd ~/screener
 python3 -m venv venv
 ./venv/bin/pip install yfinance pandas numpy flask waitress
 
-# Testa först utan internet:
-./venv/bin/python screener.py --demo
+# 2. Datamappen (användaren som kör skripten måste kunna skriva där)
+sudo mkdir -p /srv/storage/screener
+sudo chown $USER /srv/storage/screener
 
-# Sedan på riktigt:
+# 3. Svensk tid – cron och tidsstämplar följer serverns klocka
+sudo timedatectl set-timezone Europe/Stockholm
+sudo systemctl restart cron
+
+# 4. Testa utan internet, sedan på riktigt
+./venv/bin/python screener.py --demo
 ./venv/bin/python screener.py
 ```
 
-Rapporterna hamnar i `/srv/storage/screener/` (ändra `utmapp` i `KONFIG` eller använd `--utmapp`):
-- `senaste.html` – veckans rapport, skrivs över varje körning. Bokmärk den.
-- `rapport_ÅÅÅÅ-MM-DD.html` – sparad kopia per vecka
-- `rapport_ÅÅÅÅ-MM-DD.md` – samma rapport som text, bra att klistra in i en chatt
-- `screener_ÅÅÅÅ-MM-DD.csv` – all data, kan öppnas i Excel. Används också för veckojämförelsen och marknadsbredden, så radera inte de gamla.
-- `innehav.csv` – dina innehav (redigeras på webbsidan eller direkt i filen)
-- `affarer.csv` – dina avslutade affärer
-- `isin_tickers.csv` – sparade kopplingar ISIN → ticker och typ från importen
-- `kurser.csv` – stängningskurser som webbsidan använder för grafer och innehav
+Kör alltid skripten med `./venv/bin/python` (eller efter `source venv/bin/activate`). Systemets `python3` saknar paketen.
 
-Användaren som kör skriptet måste kunna skriva i mappen:
+### Datamappens innehåll
 
-```bash
-sudo mkdir -p /srv/storage/screener
-sudo chown $USER /srv/storage/screener
-```
+Undermapparna skapas automatiskt första gången de behövs.
+
+| Fil / mapp | Vad | Får raderas? |
+|---|---|---|
+| `innehav.csv` | Dina innehav | Nej |
+| `affarer.csv` | Dina avslutade affärer | Nej |
+| `isin_tickers.csv`, `.import_installningar.json` | Dina val vid Avanza-importen | Nej (annars får du välja om) |
+| `nyckeltal/ÅÅÅÅ-MM-DD.csv` | Daglig historik av nyckeltal – går inte att återskapa | **Aldrig** |
+| `screener_ÅÅÅÅ-MM-DD.csv` | All data från varje veckokörning; används för veckojämförelse, marknadsbredd och utvärdering | Nej |
+| `rapport_ÅÅÅÅ-MM-DD.html` / `.md` | Veckorapporterna (arkivet) | Ja, men de är små |
+| `senaste.html` | Senaste veckorapporten, skrivs över varje vecka | – |
+| `kurser.csv` | Stängningskurser för grafer och utveckling | Ja – återskapas vid nästa körning |
+| `backup/` | Säkerhetskopior från Avanza-importen. Bara de 10 senaste per fil behålls, äldre raderas automatiskt | Ja |
+| `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
+| `.sok_historik.json` | Senaste sökningarna på Sök-sidan | Ja |
+
+Säkerhetskopiera datamappen, inte bara git-repot – det är där allt som inte går att återskapa ligger.
 
 ## Webbsidan: veckans rapport och dina innehav
 
@@ -96,7 +116,7 @@ Det rekommenderade sättet att lägga in innehav. Under **Mina innehav → Impor
 
 Varje köp blir ett eget innehav med exakt datum och kurs, inklusive courtage. Försäljningar dras från de äldsta köpen först (FIFO) och hamnar i historiken. Avanza räknar med genomsnittskurs (GAV), så resultatet per affär kan skilja sig något från Avanzas, men totalen blir densamma. Insättningar, utdelningar och skatt hoppas över.
 
-Importen ersätter `innehav.csv` och `affarer.csv`. De gamla sparas först som `*_fore_import_<tid>.csv`. Kopplingen ISIN → ticker och dina val av typ sparas i `isin_tickers.csv`, så nästa import går på några sekunder. Exportera alltid hela historiken.
+Importen ersätter `innehav.csv` och `affarer.csv`. De gamla sparas först i `backup/` (de 10 senaste behålls). Kopplingen ISIN → ticker och dina val av typ sparas i `isin_tickers.csv`, så nästa import går på några sekunder. Exportera alltid hela historiken.
 
 Tickern hittas i första hand i sparade kopplingar, sedan i `tickers_se.csv` (om den skapats med `uppdatera_tickers.py`, som nu även sparar ISIN) och sist via en sökning hos Yahoo.
 
@@ -135,13 +155,34 @@ Köpregeln är topp 20, säljregeln topp 40. Bufferten emellan gör att en aktie
 
 Resultatet räknas på kurs mot köpkurs, utan mottagna utdelningar. Utländska innehav räknas om till kronor med dagens växelkurs.
 
+## Nyckeltal varje dag
+
+`nyckeltal.py` sparar värderings- och lönsamhetsnyckeltal (bolagsvärde, EV/EBITDA, EV/Sales, P/E, P/B, marginaler, tillväxt, sektor m.m.) för alla aktier i tickerlistan och dina innehav. En fil per dag i `<utmapp>/nyckeltal/ÅÅÅÅ-MM-DD.csv`. Yahoo lämnar bara ut dagens nyckeltal, så historiken finns bara om den sparas löpande – den används senare för att backtesta ett värderingsfilter.
+
+```bash
+./venv/bin/python nyckeltal.py --demo    # test utan internet
+./venv/bin/python nyckeltal.py           # dagens nyckeltal, tar några minuter
+```
+
+Efter körningen skrivs hur stor andel av aktierna som har varje mått ("Täckning"). Låg täckning för något mått betyder att Yahoo saknar det för många svenska bolag.
+
+**Använd kolumnerna som slutar på `_k`** (`ev_ebit_k`, `ev_ebitda_k`, `ev_sales_k`, `ps_k`, `pb_k`), inte Yahoos färdiga kvoter. Yahoo har två fel som rättas här:
+
+- **Valuta:** för bolag som rapporterar i euro eller dollar (ABB, AstraZeneca, Hexagon m.fl.) anger Yahoo kurs och börsvärde i kronor men omsättning, resultat och eget kapital i rapportvalutan – utan att växla. Kvoterna blir ungefär tio gånger fel.
+- **Bolagsvärde:** Yahoos `enterpriseValue` är ibland helt fel. Vi räknar själva: börsvärde + (skulder − kassa) × växelkurs.
+
+De korrigerade värdena räknas fram från råsiffrorna varje gång historiken läses in med `las_historik()`, så en framtida rättelse gäller automatiskt hela historiken. För banker och fastighetsbolag är EV-kvoter missvisande – använd `pb_k`.
+
 ## Köra automatiskt varje vecka
 
 Öppna crontab med `crontab -e` och lägg till (lördag kl. 08:00, efter att fredagens kurser är klara):
 
 ```
 0 8 * * 6 cd ~/screener && ./venv/bin/python screener.py >> /srv/storage/screener/logg.txt 2>&1
+30 18 * * 1-5 cd ~/screener && ./venv/bin/python nyckeltal.py >> /srv/storage/screener/nyckeltal_logg.txt 2>&1
 ```
+
+Den andra raden sparar nyckeltalen varje vardag kl. 18:30, en timme efter Stockholmsbörsens stängning.
 
 ## Anpassa
 
