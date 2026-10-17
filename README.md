@@ -104,6 +104,12 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
 - **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag, och har samma Nyckeltal-flik som aktiesidan. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
 - **Arkiv** – tidigare veckorapporter, även som .md.
+- **Status** (knappen *Data* uppe till höger) – visar om insamlingen går som den ska. Knappen är grön när allt är aktuellt och blir röd med namnet på det som släpar när:
+  - **Nyckeltal** har missat mer än en handelsdag. Dagens fil räknas först efter kl. 19, eftersom cron kör 18:30.
+  - **Veckorapporten** är äldre än 8 dagar.
+  - **Kurserna** är äldre än 9 dagar.
+
+  Sidan `/status` visar datum och antal filer för varje del. Vid rött: kontrollera cron (`crontab -l`) och loggfilerna i datamappen. Nyckeltalsdagar som missas går inte att hämta i efterhand.
 
 ### Importera från Avanza
 

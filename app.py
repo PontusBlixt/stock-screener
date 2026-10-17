@@ -235,11 +235,19 @@ table.nk td, table.nk th { white-space:nowrap }
 # Rubrikerna hämtas automatiskt från tabellhuvudet av MOBIL_JS, så sidornas
 # mallar behöver inte ändras.
 MOBIL_CSS = """
+a.status { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600;
+           padding:3px 10px; border-radius:999px; text-decoration:none !important; white-space:nowrap }
+a.status.ok { background:var(--b-behall, #e2f4e8); color:var(--pos, #0f7b3f) !important }
+a.status.varn { background:var(--b-salj, #fde2e0); color:var(--neg, #c0352b) !important }
+@media (prefers-color-scheme: dark) {
+  a.status.ok { background:var(--b-behall, #1d3a27) } a.status.varn { background:var(--b-salj, #4a2422) } }
+a.status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor }
 nav.botten { display:none }
 @media (max-width: 720px) {
   body { font-size:15px; padding-bottom:calc(68px + env(safe-area-inset-bottom)) }
   nav.topp div { padding:12px 14px; padding-top:calc(12px + env(safe-area-inset-top)) }
   nav.topp a { display:none !important }
+  nav.topp a.status { display:inline-flex !important }
   main { padding:16px 12px 24px !important }
   h1 { font-size:21px !important }
   .stats { display:grid !important; grid-template-columns:1fr 1fr; gap:8px !important }
@@ -363,7 +371,7 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 <a href="{{ url_for('innehav_sida') }}" class="{{ 'aktiv' if sida=='innehav' }}">Mina innehav</a>
 <a href="{{ url_for('utveckling_sida') }}" class="{{ 'aktiv' if sida=='utveckling' }}">Utveckling</a>
 <a href="{{ url_for('sok_sida') }}" class="{{ 'aktiv' if sida=='sok' }}">Sök</a>
-<a href="{{ url_for('arkiv') }}" class="{{ 'aktiv' if sida=='arkiv' }}">Arkiv</a></div></nav>
+<a href="{{ url_for('arkiv') }}" class="{{ 'aktiv' if sida=='arkiv' }}">Arkiv</a>{{ status|safe }}</div></nav>
 <main>
 {% with meddelanden = get_flashed_messages(with_categories=true) %}{% for kat, m in meddelanden %}
 <div class="flash {{ kat }}">{{ m }}</div>{% endfor %}{% endwith %}
@@ -375,6 +383,7 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 def sida(titel: str, flik: str, mall: str, **kw) -> str:
     innehall = render_template_string(mall, **kw)
     return render_template_string(BAS, titel=titel, sida=flik, css=CSS, innehall=innehall, head_extra=HEAD_EXTRA,
+                                  status=status_knapp(),
                                   mobil_css=MOBIL_CSS, mobil_js=MOBIL_JS, botten=botten_nav(flik))
 
 
@@ -453,6 +462,97 @@ när nätet saknas – de kan vara inaktuella.</p>
 
 
 # ---------------------------------------------------------------------------
+# Status: körs insamlingen som den ska?
+# ---------------------------------------------------------------------------
+_status_cache: dict = {"tid": 0.0, "rader": None}
+
+
+def _handelsdagar_bakat(n: int) -> list[dt.date]:
+    """De n senaste vardagarna vars data borde finnas (idag räknas efter kl. 19)."""
+    nu = dt.datetime.now()
+    d = nu.date() if nu.hour >= 19 else nu.date() - dt.timedelta(days=1)
+    ut = []
+    while len(ut) < n:
+        if d.weekday() < 5:
+            ut.append(d)
+        d -= dt.timedelta(days=1)
+    return ut
+
+
+def status_rader() -> list[dict]:
+    """En rad per insamling: namn, senaste datum, ok/varning och förklaring. Cachas en minut."""
+    import time
+    if _status_cache["rader"] is not None and time.time() - _status_cache["tid"] < 60:
+        return _status_cache["rader"]
+    rader = []
+    dagar = _handelsdagar_bakat(2)
+
+    # Nyckeltal: får missa högst en handelsdag (helgdagar, tillfälligt fel hos Yahoo)
+    filer = sorted((UTMAPP / "nyckeltal").glob("????-??-??.csv")) if (UTMAPP / "nyckeltal").exists() else []
+    if filer:
+        senast = dt.date.fromisoformat(filer[-1].stem)
+        ok = senast >= dagar[-1]
+        rader.append({"namn": "Nyckeltal", "datum": senast, "ok": ok,
+                      "text": f"{len(filer)} dagar sparade" if ok else
+                      f"inget sparat sedan {senast} – kontrollera cron och nyckeltal_logg.txt"})
+    else:
+        rader.append({"namn": "Nyckeltal", "datum": None, "ok": False, "text": "ingen insamling har körts än"})
+
+    # Veckorapporten: körs lördagar, varning om äldre än 8 dagar
+    filer = sorted(UTMAPP.glob("screener_*.csv"))
+    if filer:
+        senast = dt.date.fromisoformat(filer[-1].stem.removeprefix("screener_"))
+        ok = (dt.date.today() - senast).days <= 8
+        rader.append({"namn": "Veckorapport", "datum": senast, "ok": ok,
+                      "text": f"{len(filer)} rapporter" if ok else f"ingen ny rapport sedan {senast} – kontrollera cron och logg.txt"})
+    else:
+        rader.append({"namn": "Veckorapport", "datum": None, "ok": False, "text": "screener.py har inte körts än"})
+
+    # Kurser (uppdateras av screenern och knappen Uppdatera kurser)
+    k = kurser()
+    if len(k):
+        senast = k.index.max().date()
+        ok = (dt.date.today() - senast).days <= 9
+        rader.append({"namn": "Kurser", "datum": senast, "ok": ok,
+                      "text": "" if ok else "gamla kurser – kör screenern eller Uppdatera kurser"})
+    _status_cache.update(tid=time.time(), rader=rader)
+    return rader
+
+
+def status_knapp() -> str:
+    try:
+        rader = status_rader()
+    except Exception:
+        return ""
+    fel = [r for r in rader if not r["ok"]]
+    if not fel:
+        return '<a class="status ok" href="/status" title="All insamling är i fas">Data</a>'
+    return f'<a class="status varn" href="/status" title="{html.escape(fel[0]["text"])}">{html.escape(fel[0]["namn"])}</a>'
+
+
+STATUS_MALL = """
+<h1>Status</h1>
+<p class="muted">Om insamlingen körs som den ska. Nyckeltalen får missa en handelsdag (t.ex. helgdag) innan de flaggas.</p>
+<div class="wrap"><table>
+<thead><tr><th>Insamling</th><th>Status</th><th>Senast</th><th>Kommentar</th></tr></thead>
+<tbody>{% for r in rader %}<tr><td><b>{{ r.namn }}</b></td>
+<td><span class="badge {{ 'behall' if r.ok else 'salj' }}">{{ 'OK' if r.ok else 'KOLLA' }}</span></td>
+<td>{{ r.datum or '–' }}</td><td class="small">{{ r.text }}</td></tr>{% endfor %}</tbody></table></div>
+<div class="card" style="margin-top:16px"><h2>Felsöka på servern</h2>
+<pre class="small" style="white-space:pre-wrap;margin:0">crontab -l
+tail -30 {{ utmapp }}/nyckeltal_logg.txt
+tail -30 {{ utmapp }}/logg.txt
+timedatectl | grep "Time zone"</pre></div>
+"""
+
+
+@app.route("/status")
+def status_sida():
+    _status_cache["rader"] = None
+    return sida("Status", "", STATUS_MALL, rader=status_rader(), utmapp=UTMAPP)
+
+
+# ---------------------------------------------------------------------------
 # Veckans rapport och arkiv
 # ---------------------------------------------------------------------------
 NAV_INJEKTION = """<nav class="topp" style="background:var(--kort);border-bottom:1px solid var(--linje)">
@@ -471,7 +571,7 @@ def visa_rapport(fil: Path) -> str:
     text = fil.read_text(encoding="utf-8")
     text = text.replace("initial-scale=1\">", "initial-scale=1, viewport-fit=cover\">", 1)
     text = text.replace("</head>", HEAD_EXTRA + "<style>" + MOBIL_CSS + "</style></head>", 1)
-    text = text.replace("<body>", "<body>" + NAV_INJEKTION, 1)
+    text = text.replace("<body>", "<body>" + NAV_INJEKTION.replace("</div></nav>", status_knapp() + "</div></nav>", 1), 1)
     return text.replace("</body>", LANK_SKRIPT + botten_nav("rapport") + MOBIL_JS + "</body>", 1)
 
 
