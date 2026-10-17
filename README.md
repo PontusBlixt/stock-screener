@@ -31,7 +31,7 @@ Koden och datan ligger i två olika mappar – blanda inte ihop dem:
 
 | | Sökväg | Innehåll |
 |---|---|---|
-| **Kodmappen** | `~/screener` | `.py`-filerna, `tickers_se.csv`, `venv/`. Det här är git-repot. |
+| **Kodmappen** | `~/screener` | `.py`-filerna (inklusive `ikoner.py` med appikonerna), `tickers_se.csv`, `venv/`. Det här är git-repot. |
 | **Datamappen** | `/srv/storage/screener` (standard) | Dina innehav, affärer, rapporter, kurser och nyckeltal. Ingen kod här. |
 
 Datamappens sökväg ändras med `utmapp` i `KONFIG` i `screener.py` och med `SCREENER_UTMAPP` i `screener-web.service`. Båda måste peka på samma mapp.
@@ -154,6 +154,42 @@ Kurshistorik för dina innehav, sålda aktier och index hämtas 5 år bakåt och
 Köpregeln är topp 20, säljregeln topp 40. Bufferten emellan gör att en aktie som glider lite i rankningen inte säljs i onödan.
 
 Resultatet räknas på kurs mot köpkurs, utan mottagna utdelningar. Utländska innehav räknas om till kronor med dagens växelkurs.
+
+## På mobilen: app via Tailscale
+
+Webbsidan fungerar som en app på telefonen (en PWA): på smal skärm flyttas menyn till en bottenrad, tabellerna visas som kort och graferna ritas i ett smalare format. Den kan läggas på hemskärmen och öppnas då i helskärm med egen ikon. Tailscale ger åtkomst hemifrån utan att någon port öppnas mot internet.
+
+**1. Tailscale på servern**
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up            # öppna länken som visas och logga in
+```
+
+**2. Slå på HTTPS i Tailscale**
+
+I Tailscales admin-konsol (login.tailscale.com) → **DNS**: slå på **MagicDNS** och **HTTPS Certificates**. HTTPS behövs för att telefonen ska kunna installera sidan som app.
+
+**3. Publicera webbsidan i ditt tailnet**
+
+```bash
+sudo tailscale serve --bg 8080
+tailscale serve status       # visar adressen, t.ex. https://linux-server.<ditt-tailnet>.ts.net
+```
+
+Inställningen ligger kvar efter omstart. Sidan nås bara från enheter inloggade i ditt tailnet – den är inte publik. Ta bort med `sudo tailscale serve --https=443 off`.
+
+**4. Telefonen**
+
+1. Installera Tailscale-appen och logga in med samma konto.
+2. Öppna adressen från steg 3.
+3. Lägg till på hemskärmen:
+   - **iPhone (Safari):** Dela → *Lägg till på hemskärmen*
+   - **Android (Chrome):** menyn ⋮ → *Installera app*
+
+Utan nät visas senast öppnade versionen av varje sida (kan vara inaktuell), annars en offline-sida.
+
+Tailscale räcker som skydd. Lösenordet `SCREENER_LOSEN` fungerar i webbläsaren men kan krångla i hemskärmsläget på iPhone.
 
 ## Nyckeltal varje dag
 

@@ -36,6 +36,7 @@ import pandas as pd
 from flask import Flask, Response, abort, flash, redirect, render_template_string, request, send_file, url_for
 
 import avanza_import as ai
+import ikoner
 import innehav as ih
 import screener as sc
 
@@ -58,7 +59,7 @@ app.secret_key = os.environ.get("SCREENER_HEMLIGHET", "screener-" + str(UTMAPP))
 # ---------------------------------------------------------------------------
 @app.before_request
 def kontrollera_losen():
-    if not LOSEN:
+    if not LOSEN or request.path in OPPNA_SOKVAGAR:
         return None
     auth = request.authorization
     if auth and auth.password == LOSEN:
@@ -209,15 +210,133 @@ ul.regler { list-style:none; padding:0; margin:0 } ul.regler li { display:flex; 
 ul.regler li:last-child { border:0 }
 .prick { width:10px; height:10px; border-radius:50%; margin-top:6px; flex:none }
 .p-ok { background:var(--pos) } .p-bevaka { background:var(--gul) } .p-brutet { background:var(--neg) } .p-na { background:var(--linje) }
-svg.graf { width:100%; height:auto; display:block; min-width:560px }
+svg.graf { width:100%; height:auto; display:block }
+.graf-liten { display:none }
 .grafwrap { overflow-x:auto }
 dl.nyckel { display:grid; grid-template-columns:auto auto; gap:6px 16px; margin:0 } dl.nyckel dt { color:var(--muted) } dl.nyckel dd { margin:0; text-align:right; font-variant-numeric:tabular-nums }
 footer { margin-top:24px; font-size:12px; color:var(--muted) }
 """
 
+# ---------------------------------------------------------------------------
+# Mobil och app (PWA)
+# ---------------------------------------------------------------------------
+# På smala skärmar (< 720 px) flyttas menyn till en bottenrad och alla tabeller
+# visas som kort: varje rad blir ett kort, varje cell en rad "rubrik … värde".
+# Rubrikerna hämtas automatiskt från tabellhuvudet av MOBIL_JS, så sidornas
+# mallar behöver inte ändras.
+MOBIL_CSS = """
+nav.botten { display:none }
+@media (max-width: 720px) {
+  body { font-size:15px; padding-bottom:calc(68px + env(safe-area-inset-bottom)) }
+  nav.topp div { padding:12px 14px; padding-top:calc(12px + env(safe-area-inset-top)) }
+  nav.topp a { display:none !important }
+  main { padding:16px 12px 24px !important }
+  h1 { font-size:21px !important }
+  .stats { display:grid !important; grid-template-columns:1fr 1fr; gap:8px !important }
+  .stat { min-width:0 !important; padding:10px 12px !important }
+  .stat b { font-size:18px !important }
+  .grid { grid-template-columns:1fr !important }
+  input, select, button { font-size:16px !important }
+  input, select { width:100%; min-width:0 }
+  .grid > *, form.rad > *, .card { min-width:0 }
+  .card[style*="max-width"] { max-width:none !important }
+  button { padding:10px 14px }
+  form.rad { grid-template-columns:1fr 1fr !important }
+  form.rad button { grid-column:1 / -1 }
+  .graf-stor { display:none } .graf-liten { display:block }
+  /* Tabeller som kort */
+  main .wrap { background:none !important; border:0 !important; overflow:visible !important }
+  main table { min-width:0 !important; border:0 }
+  main table thead { display:none }
+  main table tbody, main table tr { display:block }
+  main table tr { background:var(--kort); border:1px solid var(--linje); border-radius:10px;
+                  margin:0 0 10px; padding:4px 12px 8px }
+  main table td { display:flex !important; justify-content:space-between; align-items:baseline; gap:12px;
+                  border:0 !important; padding:5px 0 !important; text-align:right !important;
+                  background:transparent !important; white-space:normal !important; min-width:0 !important }
+  main table td > .v { text-align:right; min-width:0; overflow-wrap:anywhere }
+  main table td::before { content:attr(data-label); color:var(--muted); font-size:12px; text-align:left; flex:none }
+  main table td.kortrubrik { display:block !important; text-align:left !important; font-size:16px;
+                             padding:8px 0 !important; margin-bottom:2px; border-bottom:1px solid var(--linje) !important }
+  main table td.kortrubrik::before, main table td.atgard::before { content:none }
+  main table td.atgard { justify-content:flex-end; gap:16px; padding-top:8px !important }
+  main table td.tom { display:none !important }
+  main table tr.urval { background:var(--urval, var(--kort)) }
+  nav.botten { display:grid; grid-template-columns:repeat(5,1fr); position:fixed; left:0; right:0; bottom:0; z-index:50;
+               background:var(--kort); border-top:1px solid var(--linje);
+               padding:6px 4px calc(6px + env(safe-area-inset-bottom)) }
+  nav.botten a { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:11px;
+                 color:var(--muted) !important; text-decoration:none !important; padding:4px 0 }
+  nav.botten a.aktiv { color:var(--accent) !important; font-weight:600 }
+  nav.botten svg { width:24px; height:24px }
+}
+"""
+
+HEAD_EXTRA = """<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/ikon-192.png">
+<link rel="apple-touch-icon" href="/ikon-apple.png">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Screener">"""
+
+_IKON = {
+    "rapport": '<path d="M7 3h7l5 5v13H7z M14 3v5h5 M10 13h6 M10 17h6"/>',
+    "innehav": '<path d="M4 8h16v12H4z M9 8V5h6v3 M4 13h16"/>',
+    "utveckling": '<path d="M4 19h16 M5 15l4-4 3 3 7-7 M15 7h4v4"/>',
+    "sok": '<path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z M15.5 15.5L20 20"/>',
+    "arkiv": '<path d="M4 5h16v4H4z M5 9v10h14V9 M10 13h4"/>',
+}
+_MENY = [("rapport", "/", "Rapport"), ("innehav", "/innehav", "Innehav"), ("utveckling", "/utveckling", "Utveckling"),
+         ("sok", "/sok", "Sök"), ("arkiv", "/arkiv", "Arkiv")]
+
+
+def botten_nav(aktiv: str) -> str:
+    lankar = "".join(
+        f'<a href="{url}" class="{"aktiv" if namn == aktiv else ""}">'
+        f'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+        f'stroke-linejoin="round" aria-hidden="true">{_IKON[namn]}</svg>{etikett}</a>'
+        for namn, url, etikett in _MENY)
+    return f'<nav class="botten" aria-label="Meny">{lankar}</nav>'
+
+
+MOBIL_JS = """<script>
+(function(){
+  // Ge varje tabellcell sin kolumnrubrik, så att tabellen kan visas som kort på mobilen
+  document.querySelectorAll('main table').forEach(function(t){
+    var rub=[].map.call(t.querySelectorAll('thead th'), function(e){return e.textContent.trim();});
+    t.querySelectorAll('tbody tr').forEach(function(tr){
+      var c=[].slice.call(tr.children), r=-1;
+      c.forEach(function(td,i){
+        if(rub[i]!==undefined && !td.hasAttribute('data-label')) td.setAttribute('data-label', rub[i]);
+        if(td.querySelector('form,button')) td.classList.add('atgard');
+        else if(!td.textContent.trim() && !td.querySelector('input,select,svg')) td.classList.add('tom');
+      });
+      for(var i=0;i<c.length;i++){ if(!c[i].classList.contains('atgard') && c[i].querySelector('a,b,strong')){ r=i; break; } }
+      if(!c.length) return;
+      var h=c[r<0?0:r]; h.classList.add('kortrubrik');
+      c.forEach(function(td){
+        // Rangnummer (#) flyttas in i kortrubriken
+        if(td!==h && td.getAttribute('data-label')==='#' && td.textContent.trim()){
+          var s=document.createElement('span'); s.className='muted'; s.textContent=td.textContent.trim()+'. ';
+          h.insertBefore(s, h.firstChild); td.classList.add('tom'); return; }
+        // Håll ihop cellens innehåll (t.ex. "718.95 SEK") till höger om rubriken
+        if(td!==h && !td.classList.contains('atgard') && !td.classList.contains('tom')){
+          var v=document.createElement('span'); v.className='v';
+          while(td.firstChild) v.appendChild(td.firstChild); td.appendChild(v); }
+      });
+    });
+  });
+  if('serviceWorker' in navigator && window.isSecureContext){ navigator.serviceWorker.register('/sw.js').catch(function(){}); }
+})();
+</script>"""
+
 BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ titel }} · Screener</title>
-<style>{{ css|safe }}</style></head><body>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>{{ titel }} · Screener</title>
+{{ head_extra|safe }}
+<style>{{ css|safe }}{{ mobil_css|safe }}</style></head><body>
 <nav class="topp"><div><b>📈 Screener</b>
 <a href="{{ url_for('rapport') }}" class="{{ 'aktiv' if sida=='rapport' }}">Veckans rapport</a>
 <a href="{{ url_for('innehav_sida') }}" class="{{ 'aktiv' if sida=='innehav' }}">Mina innehav</a>
@@ -229,18 +348,93 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 <div class="flash {{ kat }}">{{ m }}</div>{% endfor %}{% endwith %}
 {{ innehall|safe }}
 <footer>Underlag för egna beslut, inte köp- eller säljrekommendationer. Data: Yahoo Finance.</footer>
-</main></body></html>"""
+</main>{{ botten|safe }}{{ mobil_js|safe }}</body></html>"""
 
 
 def sida(titel: str, flik: str, mall: str, **kw) -> str:
     innehall = render_template_string(mall, **kw)
-    return render_template_string(BAS, titel=titel, sida=flik, css=CSS, innehall=innehall)
+    return render_template_string(BAS, titel=titel, sida=flik, css=CSS, innehall=innehall, head_extra=HEAD_EXTRA,
+                                  mobil_css=MOBIL_CSS, mobil_js=MOBIL_JS, botten=botten_nav(flik))
+
+
+# ---------------------------------------------------------------------------
+# App-filer: manifest, ikoner, service worker, offline-sida
+# ---------------------------------------------------------------------------
+OPPNA_SOKVAGAR = {"/manifest.webmanifest", "/sw.js", "/ikon-192.png", "/ikon-512.png",
+                  "/ikon-maskable.png", "/ikon-apple.png", "/offline"}
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    data = {
+        "name": "Momentum-screener", "short_name": "Screener", "lang": "sv",
+        "start_url": "/", "scope": "/", "display": "standalone",
+        "background_color": "#f6f7f9", "theme_color": "#2b5fd9",
+        "icons": [
+            {"src": "/ikon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/ikon-512.png", "sizes": "512x512", "type": "image/png"},
+            {"src": "/ikon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+        "shortcuts": [
+            {"name": "Mina innehav", "url": "/innehav"},
+            {"name": "Sök", "url": "/sok"},
+        ],
+    }
+    return Response(json.dumps(data, ensure_ascii=False), mimetype="application/manifest+json")
+
+
+@app.route("/ikon-<namn>.png")
+def ikon(namn: str):
+    import base64
+    if namn not in ikoner.IKONER:
+        abort(404)
+    return Response(base64.b64decode(ikoner.IKONER[namn]), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+SERVICE_WORKER = """
+// Nätet först; utan nät visas senast sparade versionen av sidan, annars en offline-sida.
+const CACHE = 'screener-v1';
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/offline', '/ikon-192.png'])));
+  self.skipWaiting();
+});
+self.addEventListener('activate', e => {
+  e.waitUntil(caches.keys().then(k => Promise.all(k.filter(n => n !== CACHE).map(n => caches.delete(n)))));
+  self.clients.claim();
+});
+self.addEventListener('fetch', e => {
+  const r = e.request;
+  if (r.method !== 'GET' || new URL(r.url).origin !== location.origin) return;
+  e.respondWith(
+    fetch(r).then(svar => {
+      if (svar.ok && r.mode === 'navigate') { const kopia = svar.clone(); caches.open(CACHE).then(c => c.put(r, kopia)); }
+      return svar;
+    }).catch(() => caches.match(r).then(m => m || (r.mode === 'navigate' ? caches.match('/offline') : Response.error())))
+  );
+});
+"""
+
+
+@app.route("/sw.js")
+def service_worker():
+    return Response(SERVICE_WORKER, mimetype="application/javascript",
+                    headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@app.route("/offline")
+def offline():
+    return sida("Offline", "", """<h1>Ingen anslutning</h1>
+<div class="card"><p>Servern går inte att nå just nu. Kontrollera att Tailscale är på i telefonen
+och att hemmaservern är igång.</p><p class="muted small">Sidor du öppnat tidigare visas från telefonens minne
+när nätet saknas – de kan vara inaktuella.</p>
+<button onclick="location.reload()">Försök igen</button></div>""")
 
 
 # ---------------------------------------------------------------------------
 # Veckans rapport och arkiv
 # ---------------------------------------------------------------------------
-NAV_INJEKTION = """<nav style="background:var(--kort);border-bottom:1px solid var(--linje)">
+NAV_INJEKTION = """<nav class="topp" style="background:var(--kort);border-bottom:1px solid var(--linje)">
 <div style="max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;gap:20px;flex-wrap:wrap">
 <b>📈 Screener</b><a href="/" style="color:var(--text);font-weight:600;text-decoration:none">Veckans rapport</a>
 <a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/sok" style="color:var(--accent);text-decoration:none">Sök</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
@@ -254,8 +448,10 @@ document.querySelectorAll('[data-t]').forEach(function(el){
 
 def visa_rapport(fil: Path) -> str:
     text = fil.read_text(encoding="utf-8")
+    text = text.replace("initial-scale=1\">", "initial-scale=1, viewport-fit=cover\">", 1)
+    text = text.replace("</head>", HEAD_EXTRA + "<style>" + MOBIL_CSS + "</style></head>", 1)
     text = text.replace("<body>", "<body>" + NAV_INJEKTION, 1)
-    return text.replace("</body>", LANK_SKRIPT + "</body>", 1)
+    return text.replace("</body>", LANK_SKRIPT + botten_nav("rapport") + MOBIL_JS + "</body>", 1)
 
 
 @app.route("/")
@@ -542,9 +738,9 @@ def salj_sida(idx: int):
 # ---------------------------------------------------------------------------
 # Utveckling och historik
 # ---------------------------------------------------------------------------
-def graf_jamfor(port: pd.Series, index: pd.Series | None, indexnamn: str) -> str:
+def graf_jamfor(port: pd.Series, index: pd.Series | None, indexnamn: str, B: int = 860) -> str:
     """Två linjer i procent: portföljen och index, med nollinje."""
-    B, H, VM, HM, TM, BM = 860, 300, 56, 16, 14, 28
+    H, VM, HM, TM, BM = (300, 56, 16, 14, 28) if B >= 600 else (280, 62, 10, 14, 28)
     serier = [port] + ([index] if index is not None else [])
     lo = min(0.0, *(float(s.min()) for s in serier))
     hi = max(0.0, *(float(s.max()) for s in serier))
@@ -579,14 +775,15 @@ def graf_jamfor(port: pd.Series, index: pd.Series | None, indexnamn: str) -> str
         delar.append(f'<line x1="{VM}" x2="{B - HM}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
                      f'stroke="var(--{"muted" if abs(v) < 1e-12 else "linje"})"/>'
                      f'<text x="{VM - 8}" y="{y(v) + 4:.1f}" text-anchor="end" font-size="11" fill="var(--muted)">'
-                     f'{v * 100:+.0f} %</text>')
+                     f'{v * 100:+.0f}{"%" if B < 600 else " %"}</text>')
         v += steg
     dagar = (port.index[-1] - port.index[0]).days
     frekv = "MS" if dagar > 75 else "W-MON"
     fmt = "%b %y" if dagar > 75 else "%d %b"
     etiketter = pd.date_range(port.index[0], port.index[-1], freq=frekv)
-    if len(etiketter) > 12:
-        etiketter = etiketter[::math.ceil(len(etiketter) / 12)]
+    maxant = 12 if B >= 600 else 5
+    if len(etiketter) > maxant:
+        etiketter = etiketter[::math.ceil(len(etiketter) / maxant)]
     for t in etiketter:
         delar.append(f'<text x="{x(t):.1f}" y="{H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">'
                      f'{t.strftime(fmt)}</text>')
@@ -695,7 +892,7 @@ def utveckling_sida():
             index_avk = float(idx.iloc[-1]) if idx is not None and pd.notna(idx.iloc[-1]) else None
             skillnad = port_avk - index_avk if index_avk is not None else None
             varde = float(u["varde_sek"].iloc[-1])
-            graf = graf_jamfor(u["avkastning"], idx, ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX))
+            graf = dubbel(graf_jamfor, u["avkastning"], idx, ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX))
 
     vis = aff.copy()
     vis["idx"] = range(len(vis))
@@ -932,7 +1129,7 @@ def import_bekrafta():
 # ---------------------------------------------------------------------------
 # Aktiesida med graf
 # ---------------------------------------------------------------------------
-def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
+def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None, B: int = 860) -> str:
     """Kursgraf som inbäddad SVG: kurs, MA50, MA200, köpkurs och stoppnivå."""
     ma50 = s.rolling(50).mean()
     ma200 = s.rolling(200).mean()
@@ -943,7 +1140,7 @@ def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
     if len(s) < 2:
         return "<p class='muted'>För lite data för en graf.</p>"
 
-    B, H, VM, HM, TM, BM = 860, 320, 56, 16, 12, 28
+    H, VM, HM, TM, BM = (320, 56, 16, 12, 28) if B >= 600 else (300, 44, 10, 12, 28)
     varden = [s.min(), s.max()] + [v for v in (ma50.min(), ma50.max(), ma200.min(), ma200.max(), kopkurs, stopp)
                                     if v is not None and pd.notna(v)]
     lo, hi = min(varden), max(varden)
@@ -978,7 +1175,8 @@ def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
                      f'<text x="{VM - 8}" y="{yy + 4:.1f}" text-anchor="end" font-size="11" fill="var(--muted)">{v:g}</text>')
         v += steg
     # Månadsetiketter
-    for t in pd.date_range(s.index[0], s.index[-1], freq="MS"):
+    manader = pd.date_range(s.index[0], s.index[-1], freq="MS")
+    for t in manader[::max(1, math.ceil(len(manader) / (12 if B >= 600 else 5)))]:
         delar.append(f'<text x="{x(t):.1f}" y="{H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">'
                      f'{t.strftime("%b %y")}</text>')
     # Köpkurs, stopp, köpdatum
@@ -999,6 +1197,12 @@ def graf_svg(s: pd.Series, kopdatum=None, kopkurs=None, stopp=None) -> str:
             + (' <span style="color:var(--pos)">┅</span> köpkurs' if kopkurs is not None and pd.notna(kopkurs) else '')
             + (' <span style="color:var(--neg)">┅</span> stopp' if stopp is not None and pd.notna(stopp) else '')
             + '</p>')
+
+
+def dubbel(funk, *args, **kw) -> str:
+    """Ritar grafen två gånger: bred (dator) och smal (mobil). CSS visar rätt version."""
+    return (f'<div class="graf-stor">{funk(*args, **kw)}</div>'
+            f'<div class="graf-liten">{funk(*args, B=420, **kw)}</div>')
 
 
 def regelstatus(a: dict) -> list[tuple[str, str, str]]:
@@ -1105,7 +1309,7 @@ def aktie(ticker: str):
         srad = r.iloc[0].to_dict() if len(r) else None
 
     forsta = poster[0] if poster else None
-    graf = graf_svg(s, forsta["kopdatum"] if forsta else None, forsta["kopkurs"] if forsta else None,
+    graf = dubbel(graf_svg, s, forsta["kopdatum"] if forsta else None, forsta["kopkurs"] if forsta else None,
                     forsta["stopp"] if forsta and forsta["typ"] == "momentum" else None)
     return sida(ticker, "innehav", AKTIE_MALL, ticker=ticker, namn=namn_for(ticker), sista=s.iloc[-1],
                 datum=s.index[-1].date(), graf=graf, poster=poster, m=m, s=srad, n_godk=n_godk)
@@ -1331,7 +1535,7 @@ def _sok(q: str, st, alla, kw):
     spara_sokning(ticker, b["beslut"])
     kw["r"] = {"ticker": ticker, "namn": namn, "valuta": valuta, "n": n, "b": b, "agd": agd,
                "klass": BESLUT_SOK[b["beslut"]], "forklaring": _forklara(b), "veckoplats": veckoplats,
-               "stopp": stopp, "graf": graf_svg(df["Close"], stopp=stopp)}
+               "stopp": stopp, "graf": dubbel(graf_svg, df["Close"], stopp=stopp)}
     return sida(f"Sök {ticker}", "sok", SOK_MALL, **kw)
 
 

@@ -45,7 +45,7 @@ import innehav as ih
 # INSTÄLLNINGAR – ändra här, inte längre ner i koden
 # ---------------------------------------------------------------------------
 KONFIG = {
-    "utmapp": "/srv/storage/screener",  # här hamnar rapporterna (din share)
+    "utmapp": "/srv/storage/aktiedata",  # här hamnar rapporterna (din share)
     "historik": "2y",                 # hur mycket kurshistorik som hämtas
     "historik_egna": "5y",            # för dina innehav, sålda aktier och index
     "min_dagar": 260,                 # minst ~1 års handel krävs för att mäta momentum
