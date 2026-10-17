@@ -1,2 +1,21 @@
 venv/
 __pycache__/
+venv/
+__pycache__/
+# Data hör hemma i datamappen, aldrig i repot
+screener/
+rapporter/
+aktiedata/
+nyckeltal/
+nyckeltal_demo/
+backup/
+innehav*.csv
+affarer*.csv
+kurser.csv
+isin_tickers.csv
+screener_*.csv
+rapport_*.*
+senaste.html
+*.bak.csv
+.import_installningar.json
+.sok_historik.json
