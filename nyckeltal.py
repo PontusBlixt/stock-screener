@@ -35,6 +35,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 import innehav as ih
@@ -227,6 +228,63 @@ def korrigera(df: pd.DataFrame) -> pd.DataFrame:
     # Kontrollvärde: hur mycket Yahoos bolagsvärde avviker från vårt (1.0 = samma)
     df["ev_yahoo_kvot"] = df["bolagsvarde"] / df["ev_k"].where(df["ev_k"] != 0)
     return df
+
+
+# ---------------------------------------------------------------------------
+# VÄRDERINGS- OCH KVALITETSPOÄNG (under utvärdering – påverkar inga regler)
+# ---------------------------------------------------------------------------
+# Definitionen är bestämd i förväg, så att backtestet testar exakt detta och vi
+# inte justerar i efterhand tills något ser bra ut.
+#
+#   Vanliga bolag:            värdering = snitt av percentil för EBIT/EV, försäljning/EV, vinst/börsvärde
+#                             kvalitet  = snitt av percentil för ROA, bruttomarginal, rörelsemarginal
+#   Banker, finans, fastighet: värdering = percentil för eget kapital/kurs (inverterat P/B)
+#                             kvalitet  = percentil för ROE
+#   Percentilen räknas inom sektorn. Sektorer med färre än MIN_SEKTOR bolag jämförs mot
+#   alla vanliga bolag. 100 = billigast / bäst i jämförelsegruppen.
+#   Flera aktieslag i samma bolag (t.ex. HUSQ-A/B) räknas som ett bolag.
+FINANS = {"Financial Services", "Real Estate"}
+MIN_SEKTOR = 8
+VARDE_MATT = {"ebit_ev": "EBIT/EV", "sales_ev": "Försäljning/EV", "e_p": "Vinst/börsvärde"}
+VARDE_MATT_FINANS = {"b_p": "Eget kapital/kurs"}
+KVAL_MATT = {"roa": "ROA", "bruttomarginal": "Bruttomarginal", "rorelsemarginal": "Rörelsemarginal"}
+KVAL_MATT_FINANS = {"roe": "ROE"}
+
+
+def poang(df: pd.DataFrame) -> pd.DataFrame:
+    """Lägger till värderingspoäng, kvalitetspoäng och percentil per mått (kolumner pct_<mått>).
+    Förutsätter att korrigera() har körts. Räknas per dag om df innehåller flera datum."""
+    import screener as _sc
+    df = df.copy()
+    for k in ("roa", "bruttomarginal", "rorelsemarginal", "roe"):  # äldre dagar saknar vissa fält
+        if k not in df.columns:
+            df[k] = np.nan
+    fx = pd.to_numeric(df["fx_rapport"], errors="coerce")
+    ev = df["ev_k"].where(df["ev_k"] > 0)
+    oms = df["omsattning"] * fx
+    df["ebit_ev"] = df["rorelsemarginal"] * oms / ev
+    df["sales_ev"] = oms / ev
+    df["e_p"] = df["nettoresultat"] * fx / df["borsvarde"].where(df["borsvarde"] > 0)
+    df["b_p"] = 1 / df["pb_k"]
+    df["finans"] = df["sektor"].isin(FINANS)
+    df["bolag"] = df["ticker"].map(_sc.bolagsnyckel)
+
+    ut = []
+    for _, dag in df.groupby("datum", sort=False):
+        unika = dag.drop_duplicates("bolag").copy()
+        storlek = unika.groupby("sektor")["ticker"].transform("size")
+        unika["grupp"] = np.where(unika["finans"] | (storlek >= MIN_SEKTOR), unika["sektor"], "Övriga sektorer")
+        unika["grupp_n"] = unika.groupby("grupp")["ticker"].transform("size")
+        for matt in list(VARDE_MATT) + list(VARDE_MATT_FINANS) + list(KVAL_MATT) + list(KVAL_MATT_FINANS):
+            unika[f"pct_{matt}"] = unika.groupby("grupp")[matt].rank(pct=True) * 100
+        vanlig = ~unika["finans"]
+        unika["varde_poang"] = np.where(vanlig, unika[[f"pct_{m}" for m in VARDE_MATT]].mean(axis=1),
+                                        unika["pct_b_p"])
+        unika["kvalitet_poang"] = np.where(vanlig, unika[[f"pct_{m}" for m in KVAL_MATT]].mean(axis=1),
+                                           unika["pct_roe"])
+        nya = [c for c in unika.columns if c.startswith("pct_")] + ["grupp", "grupp_n", "varde_poang", "kvalitet_poang"]
+        ut.append(dag.merge(unika[["bolag"] + nya], on="bolag", how="left"))
+    return pd.concat(ut, ignore_index=True) if ut else df
 
 
 def tickers_att_hamta(tickerfil: Path, utmapp: Path) -> list[str]:

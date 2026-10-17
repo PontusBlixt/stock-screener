@@ -100,9 +100,9 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 
 - **Veckans rapport** – samma som `senaste.html`. Klicka på en ticker för att se dess graf.
 - **Mina innehav** – lägg till ett köp (ticker, typ, datum, kurs, antal) eller ta bort ett. Kurserna hämtas direkt när du lägger till, och knappen *Uppdatera kurser* hämtar dagens kurser. Rankningen uppdateras bara vid veckokörningen.
-- **Aktiesida** – kursgraf med MA50, MA200, köpkurs och stoppnivå, nyckeltal och status för varje säljregel.
+- **Aktiesida** – två flikar. *Översikt*: kursgraf med MA50, MA200, köpkurs och stoppnivå, momentum och status för varje säljregel. *Nyckeltal*: värderings- och kvalitetspoäng mot sektorn, varje mått med sektormedian, analytikerdata, rapportdatum och ägande (se nedan). Adressen `…/aktie/VOLV-B.ST#nyckeltal` öppnar fliken direkt.
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
-- **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
+- **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag, och har samma Nyckeltal-flik som aktiesidan. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
 - **Arkiv** – tidigare veckorapporter, även som .md.
 
 ### Importera från Avanza
@@ -208,6 +208,23 @@ Efter körningen skrivs hur stor andel av aktierna som har varje mått ("Täckni
 - **Bolagsvärde:** Yahoos `enterpriseValue` är ibland helt fel. Vi räknar själva: börsvärde + (skulder − kassa) × växelkurs.
 
 De korrigerade värdena räknas fram från råsiffrorna varje gång historiken läses in med `las_historik()`, så en framtida rättelse gäller automatiskt hela historiken. För banker och fastighetsbolag är EV-kvoter missvisande – använd `pb_k`.
+
+### Värderings- och kvalitetspoäng (under utvärdering)
+
+Visas i fliken Nyckeltal. **Poängen påverkar inte rankningen, köpreglerna eller säljreglerna** – `screener.py` och `innehav.py` läser aldrig nyckeltalen. Under testperioden ska bara Översikt styra köp och försäljningar, så att utvärderingen av momentum blir ren.
+
+Definitionen är bestämd i förväg (funktionen `poang()` i `nyckeltal.py`), så att ett kommande backtest testar exakt detta:
+
+| | Värderingspoäng | Kvalitetspoäng |
+|---|---|---|
+| Vanliga bolag | snitt av percentilen för EBIT/EV, försäljning/EV och vinst/börsvärde | snitt av percentilen för ROA, bruttomarginal och rörelsemarginal |
+| Banker, finans, fastighet | percentilen för eget kapital/kurs (inverterat P/B) | percentilen för ROE |
+
+- Percentilen räknas inom sektorn; sektorer med färre än 8 bolag jämförs mot övriga sektorer. 100 = billigast/bäst i gruppen.
+- Negativt resultat ger låg poäng i stället för att räknas bort. Flera aktieslag i samma bolag räknas som ett bolag.
+- Planerad utvärdering efter ~6 månader: A) bara momentum, B) momentum men utan de 20 % dyraste i varje sektor, C) 70 % momentum + 30 % värdering. Ändring införs bara om både det historiska backtestet och den egna insamlade datan pekar åt samma håll.
+
+Fält som saknas i äldre dagsfiler (t.ex. analytikerdata före 2026-10-19) visas som "–". Minikurvorna i fliken visas när minst fem dagars historik finns.
 
 ## Köra automatiskt varje vecka
 

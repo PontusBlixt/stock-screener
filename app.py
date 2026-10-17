@@ -38,6 +38,7 @@ from flask import Flask, Response, abort, flash, redirect, render_template_strin
 import avanza_import as ai
 import ikoner
 import innehav as ih
+import nyckeltal as nk
 import screener as sc
 
 UTMAPP = Path(os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"])).expanduser()
@@ -215,6 +216,15 @@ svg.graf { width:100%; height:auto; display:block }
 .grafwrap { overflow-x:auto }
 dl.nyckel { display:grid; grid-template-columns:auto auto; gap:6px 16px; margin:0 } dl.nyckel dt { color:var(--muted) } dl.nyckel dd { margin:0; text-align:right; font-variant-numeric:tabular-nums }
 footer { margin-top:24px; font-size:12px; color:var(--muted) }
+.flikar { display:flex; gap:4px; border-bottom:1px solid var(--linje); margin:8px 0 16px }
+.flikar button { background:none; color:var(--muted); border-radius:0; padding:10px 14px; font-weight:600;
+                 border-bottom:2px solid transparent; margin-bottom:-1px }
+.flikar button.aktiv { color:var(--text); border-bottom-color:var(--accent) }
+.stapel { height:8px; background:var(--linje); border-radius:4px; overflow:hidden; min-width:90px }
+.stapel div { height:100%; border-radius:4px; background:var(--accent) }
+.poangbox { display:flex; align-items:baseline; gap:6px } .poangbox b { font-size:28px }
+table.nk td, table.nk th { white-space:nowrap }
+.spark { width:120px; height:28px; vertical-align:middle }
 """
 
 # ---------------------------------------------------------------------------
@@ -328,6 +338,17 @@ MOBIL_JS = """<script>
           while(td.firstChild) v.appendChild(td.firstChild); td.appendChild(v); }
       });
     });
+  });
+  // Flikar (t.ex. Översikt / Nyckeltal på aktiesidan). #nyckeltal i adressen öppnar den fliken direkt.
+  document.querySelectorAll('.flikar').forEach(function(f){
+    var knappar=f.querySelectorAll('button[data-vy]'), yta=f.parentNode;
+    function visa(v){
+      knappar.forEach(function(b){ b.classList.toggle('aktiv', b.dataset.vy===v); });
+      yta.querySelectorAll(':scope > .vy').forEach(function(d){ d.hidden = d.dataset.vy!==v; });
+      try{ history.replaceState(null,'', v==='oversikt' ? location.pathname+location.search : '#'+v); }catch(e){}
+    }
+    knappar.forEach(function(b){ b.addEventListener('click', function(){ visa(b.dataset.vy); }); });
+    if(location.hash.length>1 && f.querySelector('button[data-vy="'+location.hash.slice(1)+'"]')) visa(location.hash.slice(1));
   });
   if('serviceWorker' in navigator && window.isSecureContext){ navigator.serviceWorker.register('/sw.js').catch(function(){}); }
 })();
@@ -1233,11 +1254,209 @@ def regelstatus(a: dict) -> list[tuple[str, str, str]]:
     return ut
 
 
+# ---------------------------------------------------------------------------
+# Nyckeltalsvy (fliken "Nyckeltal" på aktiesidan och i sökningen)
+# ---------------------------------------------------------------------------
+_nk_cache: dict = {"nyckel": None, "hist": None, "senaste": None}
+
+
+def nk_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(all historik, senaste dagen med poäng). Läses om bara när en dagsfil tillkommit eller ändrats."""
+    mapp = UTMAPP / "nyckeltal"
+    filer = sorted(mapp.glob("????-??-??.csv")) if mapp.exists() else []
+    nyckel = tuple((f.name, f.stat().st_mtime) for f in filer)
+    if nyckel != _nk_cache["nyckel"]:
+        hist = nk.las_historik(UTMAPP) if filer else pd.DataFrame()
+        senaste = pd.DataFrame()
+        if len(hist) and "fx_rapport" in hist.columns:
+            senaste = nk.poang(hist[hist["datum"] == hist["datum"].max()])
+        _nk_cache.update(nyckel=nyckel, hist=hist, senaste=senaste)
+    return _nk_cache["hist"], _nk_cache["senaste"]
+
+
+def _f(x, fmt="{:.1f}", efter=""):
+    try:
+        if x is None or pd.isna(x):
+            return "–"
+        return fmt.format(float(x)) + efter
+    except (TypeError, ValueError):
+        return "–"
+
+
+def skala(x, faktor):
+    """x × faktor, eller None om x saknas (NaN, None, text)."""
+    try:
+        return None if x is None or pd.isna(x) else float(x) * faktor
+    except (TypeError, ValueError):
+        return None
+
+
+def _sparklinje(s: pd.Series) -> str:
+    s = s.dropna()
+    if len(s) < 5:
+        return ""
+    lo, hi = float(s.min()), float(s.max())
+    if hi == lo:
+        hi = lo + 1
+    p = [(i / (len(s) - 1) * 118 + 1, 26 - (v - lo) / (hi - lo) * 24) for i, v in enumerate(s)]
+    return (f'<svg class="spark" viewBox="0 0 120 28"><path d="M{" L".join(f"{a:.1f},{b:.1f}" for a, b in p)}" '
+            f'fill="none" stroke="var(--accent)" stroke-width="1.5"/></svg>')
+
+
+NK_MALL = """
+{% if not rad %}
+<div class="card"><p>Inga nyckeltal för {{ ticker|kort }} ännu.</p>
+<p class="small muted">Nyckeltal samlas varje vardag kl. 18:30 för alla aktier i tickerlistan och dina innehav
+(<code>nyckeltal.py</code>). {% if n_dagar %}Senaste insamlingen: {{ senaste_datum }}.{% else %}Ingen insamling har körts än.{% endif %}</p></div>
+{% else %}
+<p class="small muted" style="margin-top:0">Från {{ rad.datum|datum }} · {{ n_dagar }} dagar sparade sedan {{ forsta_datum }} ·
+<b>Under utvärdering</b> – påverkar inte köp- eller säljreglerna.</p>
+
+<div class="stats">
+<div class="stat"><span class="muted small">Värdering</span>
+<div class="poangbox"><b>{{ _f(rad.varde_poang, "{:.0f}") }}</b><span class="muted">/ 100</span></div>
+<div class="stapel"><div style="width:{{ _f(rad.varde_poang, "{:.0f}")|replace("–", "0") }}%"></div></div>
+<span class="small muted">billigare än {{ _f(rad.varde_poang, "{:.0f}") }} % av {{ grupp }}</span></div>
+<div class="stat"><span class="muted small">Kvalitet</span>
+<div class="poangbox"><b>{{ _f(rad.kvalitet_poang, "{:.0f}") }}</b><span class="muted">/ 100</span></div>
+<div class="stapel"><div style="width:{{ _f(rad.kvalitet_poang, "{:.0f}")|replace("–", "0") }}%"></div></div>
+<span class="small muted">lönsammare än {{ _f(rad.kvalitet_poang, "{:.0f}") }} % av {{ grupp }}</span></div>
+<div class="stat"><span class="muted small">Rapport</span><b style="font-size:18px">{{ rapport_text }}</b>
+<span class="small muted">{{ rapport_under }}</span></div>
+<div class="stat"><span class="muted small">Analytiker</span><b style="font-size:18px">{{ _f(rad.antal_analytiker, "{:.0f}", " st") }}</b>
+<span class="small muted">{% if uppsida is not none %}riktkurs {{ _f(rad.riktkurs, "{:.0f}") }} ({{ _f(x100(uppsida), "{:+.0f}", " %") }}){% else %}ingen riktkurs{% endif %}</span></div>
+</div>
+
+{% for rubrik, rader, forklaring in sektioner %}
+<h2 style="margin-top:20px">{{ rubrik }}</h2>
+<div class="wrap"><table class="nk">
+<thead><tr><th>Mått</th><th class="num">{{ ticker|kort }}</th><th class="num">Median {{ grupp }}</th><th>Läge i gruppen</th><th>Senaste dagarna</th></tr></thead>
+<tbody>{% for namn, varde, median, pct, ord, spark in rader %}
+<tr><td><b>{{ namn }}</b></td><td class="num">{{ varde }}</td><td class="num muted">{{ median }}</td>
+<td>{% if pct is not none %}<div style="display:flex;gap:8px;align-items:center"><div class="stapel" style="flex:1"><div style="width:{{ pct }}%"></div></div>
+<span class="small muted" style="white-space:nowrap">{{ ord }} än {{ pct|round|int }} %</span></div>{% endif %}</td>
+<td>{{ spark|safe }}</td></tr>{% endfor %}</tbody></table></div>
+{% if forklaring %}<p class="small muted">{{ forklaring }}</p>{% endif %}
+{% endfor %}
+
+<div class="grid">
+<div class="card"><h2>Analytiker</h2><dl class="nyckel">
+<dt>Vinst per aktie, senaste 12 mån</dt><dd>{{ _f(rad.vinst_per_aktie, "{:.2f}") }}</dd>
+<dt>Vinst per aktie, prognos</dt><dd>{{ _f(rad.vinst_per_aktie_prognos, "{:.2f}") }}</dd>
+<dt>Förväntad vinstförändring</dt><dd class="{{ vinstforandring|klass }}">{{ _f(x100(vinstforandring), "{:+.0f}", " %") }}</dd>
+<dt>Prognosändring sedan {{ revision_fran or "–" }}</dt><dd class="{{ revision|klass }}">{{ _f(x100(revision), "{:+.1f}", " %") }}</dd>
+<dt>Rekommendation</dt><dd>{{ rek_text }}</dd>
+</dl><p class="small muted">Prognosändringen (revideringen) blir meningsfull när några veckors historik finns. Stigande prognoser är en av de starkaste kända signalerna.</p></div>
+<div class="card"><h2>Ägande och skuld</h2><dl class="nyckel">
+<dt>Insiders</dt><dd>{{ _f(x100(rad.andel_insiders), "{:.0f}", " %") }}</dd>
+<dt>Institutioner</dt><dd>{{ _f(x100(rad.andel_institutioner), "{:.0f}", " %") }}</dd>
+<dt>Skuld / eget kapital</dt><dd>{{ _f(rad.skuld_ek, "{:.0f}", " %") }}</dd>
+<dt>Direktavkastning</dt><dd>{{ _f(rad.direktavkastning, "{:.1f}", " %") }}</dd>
+<dt>Börsvärde</dt><dd>{{ _f(skala(rad.borsvarde, 1e-9), "{:.1f}", " mdr kr") }}</dd>
+{% if rad.rapportvaluta and rad.rapportvaluta != rad.valuta %}<dt>Rapportvaluta</dt><dd>{{ rad.rapportvaluta }} (omräknat)</dd>{% endif %}
+</dl></div>
+</div>
+<p class="small muted">Jämförelsegrupp: {{ grupp }} ({{ grupp_n }} bolag). {{ metod }}</p>
+{% endif %}
+"""
+
+
+def nyckeltal_vy(ticker: str) -> str:
+    """Nyckeltalsfliken. Ett fel här får aldrig fälla resten av aktiesidan."""
+    try:
+        return _nyckeltal_vy(ticker)
+    except Exception:
+        import traceback
+        app.logger.error("Nyckeltalsvyn för %s misslyckades:\n%s", ticker, traceback.format_exc())
+        return ('<div class="flash fel">Nyckeltalen kunde inte visas just nu. '
+                'Detaljer finns i <code>journalctl -u screener-web</code>.</div>')
+
+
+def _nyckeltal_vy(ticker: str) -> str:
+    hist, senaste = nk_data()
+    kw = dict(ticker=ticker, rad=None, n_dagar=hist["datum"].nunique() if len(hist) else 0, _f=_f,
+              x100=lambda x: skala(x, 100), skala=skala,
+              senaste_datum=hist["datum"].max().date() if len(hist) else None)
+    if len(senaste) == 0 or ticker not in set(senaste["ticker"]):
+        return render_template_string(NK_MALL, **kw)
+    rad = senaste[senaste["ticker"] == ticker].iloc[0].to_dict()
+    for k in nk.KOLUMNER:  # äldre dagsfiler saknar fält som lagts till senare – visa dem som "–"
+        rad.setdefault(k, None)
+    grupp = rad["grupp"] if isinstance(rad["grupp"], str) else (rad["sektor"] or "marknaden")
+    jmf = senaste[senaste["grupp"] == rad["grupp"]] if isinstance(rad["grupp"], str) else senaste
+    egen = hist[hist["ticker"] == ticker].sort_values("datum")
+
+    def med(k):
+        return jmf[k].median() if k in jmf else np.nan
+
+    def r(namn, k, fmt, pct_k=None, ord="billigare", efter=""):
+        pct = rad.get(pct_k) if pct_k else None
+        pct = None if pct is None or pd.isna(pct) else float(pct)
+        return (namn, _f(rad.get(k), fmt, efter), _f(med(k), fmt, efter), pct, ord,
+                _sparklinje(egen[k]) if k in egen else "")
+
+    if rad["finans"]:
+        vard = [r("P/B", "pb_k", "{:.2f}", "pct_b_p"), r("P/E", "pe", "{:.1f}", "pct_e_p")]
+        kval = [r("ROE", "roe", "{:.1%}", "pct_roe", "bättre"),
+                r("Rörelsemarginal", "rorelsemarginal", "{:.1%}")]
+        metod = "Banker, finans och fastighet värderas med eget kapital mot kurs (P/B), eftersom EV-mått blir missvisande för dem."
+    else:
+        vard = [r("EV/EBIT", "ev_ebit_k", "{:.1f}", "pct_ebit_ev"), r("EV/Sales", "ev_sales_k", "{:.2f}", "pct_sales_ev"),
+                r("P/E", "pe", "{:.1f}", "pct_e_p"), r("EV/EBITDA", "ev_ebitda_k", "{:.1f}"), r("P/B", "pb_k", "{:.2f}")]
+        kval = [r("ROA", "roa", "{:.1%}", "pct_roa", "bättre"),
+                r("Bruttomarginal", "bruttomarginal", "{:.1%}", "pct_bruttomarginal", "bättre"),
+                r("Rörelsemarginal", "rorelsemarginal", "{:.1%}", "pct_rorelsemarginal", "bättre"),
+                r("ROE", "roe", "{:.1%}")]
+        metod = ("Värderingspoängen är snittet av percentilen för EBIT/EV, försäljning/EV och vinst/börsvärde; "
+                 "kvalitetspoängen av ROA, brutto- och rörelsemarginal. Negativt resultat ger låg poäng i stället för att räknas bort.")
+    tillv = [r("Omsättningstillväxt", "omsattningstillvaxt", "{:+.1%}"), r("Vinsttillväxt", "vinsttillvaxt", "{:+.1%}")]
+
+    # Rapportdatum
+    rapport_text, rapport_under = "–", ""
+    idag = pd.Timestamp.today().normalize()
+    nasta = pd.to_datetime(rad.get("nasta_rapport"), errors="coerce")
+    senast = pd.to_datetime(rad.get("senaste_kvartal"), errors="coerce")
+    if pd.notna(nasta) and nasta >= idag:
+        dagar = (nasta - idag).days
+        rapport_text = nasta.strftime("%Y-%m-%d")
+        rapport_under = "idag" if dagar == 0 else f"om {dagar} dagar" + (" – räkna med större svängningar" if dagar <= 7 else "")
+    elif pd.notna(senast):
+        rapport_text, rapport_under = senast.strftime("%Y-%m-%d"), "senaste rapporterade kvartal"
+
+    def tal(x):
+        return None if x is None or pd.isna(x) else float(x)
+
+    eps, eps_p, kurs, rikt = (tal(rad.get(k)) for k in ("vinst_per_aktie", "vinst_per_aktie_prognos", "kurs", "riktkurs"))
+    revision = revision_fran = None
+    if "vinst_per_aktie_prognos" in egen:
+        e = egen.dropna(subset=["vinst_per_aktie_prognos"])
+        e = e[e["datum"] >= e["datum"].max() - pd.Timedelta(days=90)] if len(e) else e
+        if len(e) >= 2 and e["vinst_per_aktie_prognos"].iloc[0]:
+            revision = e["vinst_per_aktie_prognos"].iloc[-1] / abs(e["vinst_per_aktie_prognos"].iloc[0]) - 1
+            revision_fran = e["datum"].iloc[0].date()
+    rek = tal(rad.get("rekommendation"))
+    rek_text = "–" if rek is None else f"{rek:.1f} – " + ("köp" if rek < 2.5 else "behåll" if rek < 3.5 else "sälj")
+
+    kw.update(rad=rad, grupp=grupp, grupp_n=int(rad["grupp_n"]) if pd.notna(rad.get("grupp_n")) else len(jmf),
+              forsta_datum=egen["datum"].min().date() if len(egen) else None, metod=metod,
+              sektioner=[("Värdering", vard, "Lägre multipel = billigare. Stapeln visar hur billig aktien är jämfört med gruppen."),
+                         ("Lönsamhet och kvalitet", kval, "Skydd mot värdefällor: billigt och lönsamt är bättre än billigt och olönsamt."),
+                         ("Tillväxt", tillv, "")],
+              rapport_text=rapport_text, rapport_under=rapport_under,
+              uppsida=(rikt / kurs - 1) if rikt and kurs else None,
+              vinstforandring=(eps_p / abs(eps) - 1) if eps and eps_p is not None else None,
+              revision=revision, revision_fran=revision_fran, rek_text=rek_text)
+    return render_template_string(NK_MALL, **kw)
+
+
 AKTIE_MALL = """
 <p class="small"><a href="{{ url_for('innehav_sida') }}">← Mina innehav</a> · <a href="{{ url_for('rapport') }}">Veckans rapport</a></p>
 <h1>{{ ticker|kort }} <span class="muted" style="font-weight:400">{{ namn }}</span></h1>
 <p class="muted">Senaste kurs {{ sista|tal }} ({{ datum }})</p>
-
+<div>
+<div class="flikar"><button data-vy="oversikt" class="aktiv">Översikt</button><button data-vy="nyckeltal">Nyckeltal</button></div>
+<div class="vy" data-vy="nyckeltal" hidden>{{ nkvy|safe }}</div>
+<div class="vy" data-vy="oversikt">
 <div class="card">{{ graf|safe }}</div>
 
 {% for a in poster %}
@@ -1280,6 +1499,7 @@ AKTIE_MALL = """
 <dt>Omsättning/dag</dt><dd>{{ (s.omsattning_sek / 1e6)|tal(0) }} MSEK</dd>
 </dl>{% else %}<p class="muted small">Ingår inte i den svenska screenern.</p>{% endif %}
 </div></div>
+</div></div>
 """
 
 
@@ -1312,7 +1532,8 @@ def aktie(ticker: str):
     graf = dubbel(graf_svg, s, forsta["kopdatum"] if forsta else None, forsta["kopkurs"] if forsta else None,
                     forsta["stopp"] if forsta and forsta["typ"] == "momentum" else None)
     return sida(ticker, "innehav", AKTIE_MALL, ticker=ticker, namn=namn_for(ticker), sista=s.iloc[-1],
-                datum=s.index[-1].date(), graf=graf, poster=poster, m=m, s=srad, n_godk=n_godk)
+                datum=s.index[-1].date(), graf=graf, poster=poster, m=m, s=srad, n_godk=n_godk,
+                nkvy=nyckeltal_vy(ticker))
 
 
 # ---------------------------------------------------------------------------
@@ -1406,6 +1627,10 @@ SOK_MALL = """
 <div class="small muted" style="margin-top:6px">{{ r.forklaring }}</div></div>
 </div>
 
+<div>
+<div class="flikar"><button data-vy="oversikt" class="aktiv">Översikt</button><button data-vy="nyckeltal">Nyckeltal</button></div>
+<div class="vy" data-vy="nyckeltal" hidden>{{ r.nkvy|safe }}</div>
+<div class="vy" data-vy="oversikt">
 <div class="card">{{ r.graf|safe }}</div>
 
 <div class="grid">
@@ -1434,6 +1659,7 @@ SOK_MALL = """
 {% if not r.agd %}<a href="{{ url_for('innehav_sida', ticker=r.ticker) }}#lagg-till" class="small">Lägg till som innehav →</a>{% endif %}
 </div>
 </div>
+</div></div>
 <p class="small muted">Kontrollera alltid nyheter och kommande rapportdatum innan köp. Regler tillämpade på kursdata, inte en köprekommendation.</p>
 {% endif %}
 
@@ -1535,7 +1761,7 @@ def _sok(q: str, st, alla, kw):
     spara_sokning(ticker, b["beslut"])
     kw["r"] = {"ticker": ticker, "namn": namn, "valuta": valuta, "n": n, "b": b, "agd": agd,
                "klass": BESLUT_SOK[b["beslut"]], "forklaring": _forklara(b), "veckoplats": veckoplats,
-               "stopp": stopp, "graf": dubbel(graf_svg, df["Close"], stopp=stopp)}
+               "stopp": stopp, "graf": dubbel(graf_svg, df["Close"], stopp=stopp), "nkvy": nyckeltal_vy(ticker)}
     return sida(f"Sök {ticker}", "sok", SOK_MALL, **kw)
 
 
