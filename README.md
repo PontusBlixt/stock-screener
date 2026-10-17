@@ -193,7 +193,7 @@ Tailscale räcker som skydd. Lösenordet `SCREENER_LOSEN` fungerar i webbläsare
 
 ## Nyckeltal varje dag
 
-`nyckeltal.py` sparar värderings- och lönsamhetsnyckeltal (bolagsvärde, EV/EBITDA, EV/Sales, P/E, P/B, marginaler, tillväxt, sektor m.m.) för alla aktier i tickerlistan och dina innehav. En fil per dag i `<utmapp>/nyckeltal/ÅÅÅÅ-MM-DD.csv`. Yahoo lämnar bara ut dagens nyckeltal, så historiken finns bara om den sparas löpande – den används senare för att backtesta ett värderingsfilter.
+`nyckeltal.py` sparar värderings-, kvalitets- och analytikernyckeltal (bolagsvärde, EV/EBITDA, EV/Sales, P/E, P/B, marginaler, ROA, tillväxt, analytikernas vinstprognos och riktkurs, ägarandelar, rapportdatum, sektor m.m.) för alla aktier i tickerlistan och dina innehav. En fil per dag i `<utmapp>/nyckeltal/ÅÅÅÅ-MM-DD.csv`. Yahoo lämnar bara ut dagens nyckeltal, så historiken finns bara om den sparas löpande – den används senare för att backtesta ett värderingsfilter.
 
 ```bash
 ./venv/bin/python nyckeltal.py --demo    # test utan internet
