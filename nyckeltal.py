@@ -82,7 +82,7 @@ TEXTFALT = {"sektor", "bransch", "valuta", "rapportvaluta"}
 # Yahoo anger bolagsvärde/börsvärde i handelsvaluta (SEK) men omsättning, EBITDA och
 # resultat i rapportvaluta (t.ex. USD för ABB) – och räknar sina färdiga kvoter utan
 # att växla. Kvoterna nedan (_k) är därför omräknade och de som ska användas.
-KORR = ["ev_sales_k", "ev_ebitda_k", "ev_ebit_k", "ps_k"]
+KORR = ["ev_k", "ev_sales_k", "ev_ebitda_k", "ev_ebit_k", "ps_k", "pb_k", "ev_yahoo_kvot"]
 KOLUMNER = ["datum", "ticker"] + list(FALT.values()) + ["fx_rapport"] + KORR
 
 PAUS = (0.4, 0.9)       # sekunder mellan anrop (slumpad)
@@ -137,8 +137,24 @@ def demo_en(ticker: str) -> dict:
     }
 
 
+def _senaste(symbol: str) -> float:
+    """Senaste stängningskurs för en valutasymbol hos Yahoo, NaN om den saknas (utan felutskrifter)."""
+    import contextlib
+    import io as _io
+    import logging
+    import yfinance as yf
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()), contextlib.redirect_stdout(_io.StringIO()):
+            s = yf.download(symbol, period="10d", progress=False, auto_adjust=True)["Close"].dropna()
+        return float(s.iloc[-1].squeeze()) if len(s) else float("nan")
+    except Exception:
+        return float("nan")
+
+
 def hamta_fx(par: set[tuple[str, str]], demo: bool = False) -> dict[tuple[str, str], float]:
-    """Växelkurser (från, till) -> kurs, t.ex. ('USD','SEK') -> 10.4. Saknas en kurs blir den NaN."""
+    """Växelkurser (från, till) -> kurs, t.ex. ('USD','SEK') -> 10.4.
+    Saknar Yahoo direktkursen (t.ex. PLNSEK=X) prövas omvänd kurs och sedan via euro."""
     ut = {}
     for fran, till in par:
         if fran == till:
@@ -147,30 +163,49 @@ def hamta_fx(par: set[tuple[str, str]], demo: bool = False) -> dict[tuple[str, s
         if demo:
             ut[(fran, till)] = {"EUR": 11.2, "USD": 10.4}.get(fran, float("nan"))
             continue
-        try:
-            import yfinance as yf
-            s = yf.download(f"{fran}{till}=X", period="10d", progress=False, auto_adjust=True)["Close"].dropna()
-            ut[(fran, till)] = float(s.iloc[-1].squeeze()) if len(s) else float("nan")
-        except Exception as e:
-            print(f"  växelkurs {fran}{till} saknas ({e})", file=sys.stderr)
-            ut[(fran, till)] = float("nan")
+        kurs = _senaste(f"{fran}{till}=X")
+        if kurs != kurs:  # NaN
+            omvand = _senaste(f"{till}{fran}=X")
+            kurs = 1 / omvand if omvand == omvand and omvand else float("nan")
+        if kurs != kurs and "EUR" not in (fran, till):
+            eur_till, eur_fran = _senaste(f"EUR{till}=X"), _senaste(f"EUR{fran}=X")
+            if eur_till == eur_till and eur_fran == eur_fran and eur_fran:
+                kurs = eur_till / eur_fran
+        if kurs != kurs:
+            print(f"  växelkurs {fran}→{till} saknas – EV-kvoterna blir tomma för de bolagen", file=sys.stderr)
+        ut[(fran, till)] = kurs
     return ut
 
 
 def korrigera(df: pd.DataFrame) -> pd.DataFrame:
-    """Räknar om kvoterna med omsättning och resultat i handelsvaluta.
-    EV/EBIT räknas som bolagsvärde / (rörelsemarginal × omsättning). Negativt EBIT,
-    EBITDA eller bolagsvärde ger tomt värde – en kvot på något negativt går inte att jämföra."""
+    """Räknar om värderingarna från de råa siffrorna, i handelsvaluta (SEK).
+
+    Två fel i Yahoos färdiga kvoter rättas här:
+      1. Valuta: bolagsvärde och kurs är i SEK, men omsättning, resultat, skulder,
+         kassa och eget kapital är i rapportvaluta (t.ex. USD för ABB). Yahoo växlar inte.
+      2. Bolagsvärde: Yahoos enterpriseValue är ibland helt fel (t.ex. räknat i fel valuta).
+         Vi räknar därför själva: EV = börsvärde + (skulder − kassa) × växelkurs.
+
+    Körs både när filen sparas och när historiken läses in, så att en rättelse här
+    automatiskt gäller även för redan sparade dagar.
+    Negativt EBIT, EBITDA eller bolagsvärde ger tomt värde – kvoter på negativa tal går inte att jämföra.
+    För banker och fastighetsbolag är EV-kvoter missvisande; använd pb_k för dem."""
     df = df.copy()
     fx = pd.to_numeric(df.get("fx_rapport"), errors="coerce")
     oms = df["omsattning"] * fx
     ebitda = df["ebitda"] * fx
     ebit = df["rorelsemarginal"] * oms
-    ev = df["bolagsvarde"].where(df["bolagsvarde"] > 0)
+    nettoskuld = (df["skulder"].fillna(0) - df["kassa"].fillna(0)) * fx
+    df["ev_k"] = df["borsvarde"] + nettoskuld
+    ev = df["ev_k"].where(df["ev_k"] > 0)
     df["ev_sales_k"] = ev / oms.where(oms > 0)
     df["ev_ebitda_k"] = ev / ebitda.where(ebitda > 0)
     df["ev_ebit_k"] = ev / ebit.where(ebit > 0)
     df["ps_k"] = df["borsvarde"] / oms.where(oms > 0)
+    ek = df["eget_kapital_per_aktie"] * fx
+    df["pb_k"] = df["kurs"] / ek.where(ek > 0)
+    # Kontrollvärde: hur mycket Yahoos bolagsvärde avviker från vårt (1.0 = samma)
+    df["ev_yahoo_kvot"] = df["bolagsvarde"] / df["ev_k"].where(df["ev_k"] != 0)
     return df
 
 
@@ -213,7 +248,7 @@ def samla(tickers: list[str], utmapp: Path, demo: bool = False) -> Path:
              if saknas else ""), file=sys.stderr)
     # Kvalitetskontroll: hur stor andel har värderingsmått?
     if len(df):
-        tackning = {k: df[k].notna().mean() for k in ("ev_ebit_k", "ev_ebitda_k", "ev_sales_k", "pe", "pb", "sektor")}
+        tackning = {k: df[k].notna().mean() for k in ("ev_ebit_k", "ev_ebitda_k", "ev_sales_k", "pe", "pb_k", "sektor")}
         print("  Täckning: " + ", ".join(f"{k} {v * 100:.0f} %" for k, v in tackning.items()), file=sys.stderr)
     return fil
 
@@ -225,7 +260,10 @@ def las_historik(utmapp: Path) -> pd.DataFrame:
         return pd.DataFrame(columns=KOLUMNER)
     df = pd.concat((pd.read_csv(f) for f in filer), ignore_index=True)
     df["datum"] = pd.to_datetime(df["datum"])
-    return df  # filer från före valutakorrigeringen saknar fx_rapport och _k-kolumnerna
+    # Räkna alltid om från råvärdena, så att senaste versionen av korrigera() gäller hela historiken
+    if "fx_rapport" in df.columns:
+        df = korrigera(df)
+    return df
 
 
 def main() -> int:
