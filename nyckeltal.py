@@ -71,6 +71,21 @@ FALT = {
     "revenueGrowth": "omsattningstillvaxt",
     "earningsGrowth": "vinsttillvaxt",
     "beta": "beta",
+    "grossMargins": "bruttomarginal",
+    "ebitdaMargins": "ebitdamarginal",
+    "returnOnAssets": "roa",               # avkastning på totalt kapital
+    # Analytiker – prognosrevideringar kräver egen daglig historik
+    "trailingEps": "vinst_per_aktie",
+    "forwardEps": "vinst_per_aktie_prognos",
+    "targetMeanPrice": "riktkurs",
+    "recommendationMean": "rekommendation",  # 1 = starkt köp … 5 = sälj
+    "numberOfAnalystOpinions": "antal_analytiker",
+    # Ägande
+    "heldPercentInsiders": "andel_insiders",
+    "heldPercentInstitutions": "andel_institutioner",
+    # Rapporter – när siffrorna senast uppdaterades
+    "mostRecentQuarter": "senaste_kvartal",       # sekunder sedan 1970 (Yahoo)
+    "earningsTimestamp": "nasta_rapport",         # sekunder sedan 1970 (Yahoo)
     # Klassning – behövs för att jämföra inom sektor
     "sector": "sektor",
     "industry": "bransch",
@@ -131,6 +146,11 @@ def demo_en(ticker: str) -> dict:
         "eget_kapital_per_aktie": r.uniform(10, 200), "vinstmarginal": marg, "rorelsemarginal": marg + 0.03,
         "roe": r.uniform(-0.1, 0.3), "skuld_ek": r.uniform(0, 150), "omsattningstillvaxt": r.uniform(-0.1, 0.3),
         "vinsttillvaxt": r.uniform(-0.5, 0.6), "beta": r.uniform(0.5, 1.8),
+        "bruttomarginal": r.uniform(0.1, 0.7), "ebitdamarginal": marg + 0.05, "roa": r.uniform(-0.05, 0.15),
+        "vinst_per_aktie": r.uniform(-2, 20), "vinst_per_aktie_prognos": r.uniform(0, 22), "riktkurs": r.uniform(20, 450),
+        "rekommendation": r.uniform(1.5, 3.5), "antal_analytiker": r.randint(0, 12),
+        "andel_insiders": r.uniform(0, 0.6), "andel_institutioner": r.uniform(0.1, 0.8),
+        "senaste_kvartal": 1782777600, "nasta_rapport": 1792000000,
         "sektor": r.choice(["Industrials", "Technology", "Financial Services", "Healthcare", "Real Estate",
                             "Consumer Cyclical", "Basic Materials"]),
         "bransch": "Demo", "valuta": "SEK", "rapportvaluta": r.choice(["SEK", "SEK", "SEK", "EUR"]),
@@ -237,6 +257,9 @@ def samla(tickers: list[str], utmapp: Path, demo: bool = False) -> Path:
         kurser = hamta_fx(set(zip(rv, hv)), demo)
         df["fx_rapport"] = [kurser.get((a, b), float("nan")) for a, b in zip(rv, hv)]
         df = korrigera(df)
+    for k in ("senaste_kvartal", "nasta_rapport"):
+        if k in df.columns:
+            df[k] = pd.to_datetime(pd.to_numeric(df[k], errors="coerce"), unit="s", errors="coerce").dt.date
     df = df.reindex(columns=KOLUMNER)
     fil = mapp(utmapp, demo) / f"{idag}.csv"
     tmp = fil.with_suffix(".tmp")
@@ -248,7 +271,8 @@ def samla(tickers: list[str], utmapp: Path, demo: bool = False) -> Path:
              if saknas else ""), file=sys.stderr)
     # Kvalitetskontroll: hur stor andel har värderingsmått?
     if len(df):
-        tackning = {k: df[k].notna().mean() for k in ("ev_ebit_k", "ev_ebitda_k", "ev_sales_k", "pe", "pb_k", "sektor")}
+        tackning = {k: df[k].notna().mean() for k in ("ev_ebit_k", "ev_ebitda_k", "ev_sales_k", "pe", "pb_k", "sektor",
+                                                  "vinst_per_aktie_prognos", "roa", "senaste_kvartal")}
         print("  Täckning: " + ", ".join(f"{k} {v * 100:.0f} %" for k, v in tackning.items()), file=sys.stderr)
     return fil
 
