@@ -237,9 +237,9 @@ Fält som saknas i äldre dagsfiler (t.ex. analytikerdata före 2026-10-19) visa
 
 ## Strategier: låtsasportföljer (pappershandel)
 
-Det enda sättet att veta om en strategi fungerar är att se den gå framåt i tiden, där ingen kan ha facit i efterhand. Varje strategi har därför en egen låtsasportfölj som sköts av `strategier.py`. Den körs automatiskt i slutet av `screener.py` varje lördag – ingen extra cron-rad behövs – och rör aldrig `innehav.csv` eller `affarer.csv`.
+Det enda sättet att veta om en strategi fungerar är att se den gå framåt i tiden, där ingen kan ha facit i efterhand. Varje strategi har därför en egen låtsasportfölj som sköts av `strategier.py`. Den körs automatiskt i slutet av `screener.py` varje lördag och rör aldrig `innehav.csv` eller `affarer.csv`. Bara strategin *Daglig stopp* behöver en egen cron-rad (se *Köra automatiskt*).
 
-**Reglerna är desamma som du följer:**
+**Reglerna är desamma som du följer** (om inte strategin säger annat):
 
 - Boten beslutar en gång i veckan, på samma kurser som veckorapporten (fredagens stängning).
 - Den säljer bara det reglerna säger: **SÄLJ** direkt (stopp, MA200, MA50 under MA200), **SÄLJ VID MÅNADSGENOMGÅNG** vid första körningen i en ny månad, och **TRIMMA** ned till jämn vikt. BEHÅLL och BEVAKA behålls.
@@ -249,26 +249,34 @@ Det enda sättet att veta om en strategi fungerar är att se den gå framåt i t
 - Courtage 0,25 %, minst 1 kr (Avanza Mini), och 0,1 % spread på varje köp och sälj. Ändra `COURTAGE_PROCENT`, `COURTAGE_MINIMUM` och `SPREAD` överst i `strategier.py` om din courtageklass är en annan.
 - Utdelningar räknas som återinvesterade (Yahoos justerade kurser), precis som på Utveckling-sidan.
 
-**Strategierna** – de tre som förregistrerats under *Värderings- och kvalitetspoäng*:
+**Strategierna.** Varje strategi ändrar en sak jämfört med Momentum v1 och svarar på en egen fråga:
 
-| | Strategi | Skillnad mot veckorapporten |
+| Strategi | Skillnad mot Momentum v1 | Frågan den svarar på |
 |---|---|---|
-| A | Momentum v1 | Ingen – exakt veckorapporten |
-| B | Utan dyraste 20 % | Aktier bland de 20 % dyraste i sin sektor räknas som "klarar inte filtret" och får ingen plats |
-| C | 70/30 momentum/värde | Rangordnas på 70 % momentumpoäng + 30 % värderingspoäng (percentil inom sektorn) |
+| Momentum v1 | Ingen – exakt veckorapporten | Grundstrategin du följer |
+| B: utan dyraste 20 % | Aktier bland de 20 % dyraste i sin sektor räknas som "klarar inte filtret" | Lönar det sig att undvika dyra aktier? |
+| C: 70/30 momentum/värde | Rangordnas på 70 % momentumpoäng + 30 % värderingspoäng | Lönar det sig att väga in billighet? |
+| Momentum + kvalitet | Rangordnas på 70 % momentumpoäng + 30 % kvalitetspoäng | Lönar det sig att väga in lönsamhet? |
+| Topp 10 | 10 innehav (plats 1–10), dubbel vikt, säljs utanför topp 20 | Ger färre och starkare aktier mer? |
+| Utan urvalsregler | Köper plats 1–20 även utan grön rad | Hjälper urvalsreglerna (uttänjd, likviditet, volatilitet)? |
+| Daglig stopp | SÄLJ-reglerna (stopp, MA200, MA50) kollas varje vardag. Köp, månadsgenomgång och trimning sker fortfarande bara på lördagar | Räddar en snabbare stopp pengar, eller säljer den bara i onödan? |
+| Slumpportfölj | Köper slumpvisa aktier bland de godkända (som klarar trendfiltren). Ingen rankningsregel vid sälj – annars samma säljregler | Hur mycket ger ren tur? Måttstocken för alla andra |
 
-B och C behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie värderingspoäng tas den inte bort i B och räknas som medel (50) i C.
+B, C och Momentum + kvalitet behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie poäng tas den inte bort i B och räknas som medel (50) i C och Momentum + kvalitet. Slumpportföljens lottning bestäms av strategi och datum, så en omkörning ger samma lottning.
+
+**Så läser du resultatet.** Med åtta strategier kommer någon att se bäst ut av ren tur, särskilt de första månaderna. Jämför därför alltid med Slumpportföljen: en strategi som inte ligger tydligt och stabilt över den har inte visat något. Tumregel: döm inget förrän efter minst 6 månader, och lita mer på en strategi som ligger före hela tiden än på en som fick ett enstaka lyft.
 
 **Starta nu** i stället för att vänta till lördag (startar på den senaste veckorapporten):
 
 ```bash
 cd ~/screener && ./venv/bin/python strategier.py
 ./venv/bin/python strategier.py --status   # visa ställningen utan att köra
+./venv/bin/python strategier.py --dagligt  # daglig kontroll för Daglig stopp (körs av cron)
 ```
 
 En strategi börjar på den rapport som finns när den startas – historiken spelas inte upp i efterhand, eftersom det vore ett backtest och inte ett framåttest. Om veckokörningen missas en lördag kör boten ikapp de rapporter den missat nästa gång, i datumordning.
 
-**Lägga till en strategi senare:** lägg till den i `STRATEGIER` och i `rangordna()` i `strategier.py`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
+**Lägga till en strategi senare:** lägg till den i `STRATEGIER` i `strategier.py`. Enkla varianter (antal innehav, köpgräns, säljgräns, stopp, urvalsregler, daglig kontroll) görs bara med inställningarna i `STANDARD`. En ny rangordning behöver också en rad i `rangordna()`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
 
 ## Köra automatiskt varje vecka
 
@@ -277,9 +285,12 @@ En strategi börjar på den rapport som finns när den startas – historiken sp
 ```
 0 8 * * 6 cd ~/screener && ./venv/bin/python screener.py >> /srv/storage/screener/logg.txt 2>&1
 30 18 * * 1-5 cd ~/screener && ./venv/bin/python nyckeltal.py >> /srv/storage/screener/nyckeltal_logg.txt 2>&1
+45 18 * * 1-5 cd ~/screener && ./venv/bin/python strategier.py --dagligt >> /srv/storage/screener/strategier_logg.txt 2>&1
 ```
 
 Den andra raden sparar nyckeltalen varje vardag kl. 18:30, en timme efter Stockholmsbörsens stängning.
+
+Den tredje raden är den dagliga kontrollen för strategin *Daglig stopp*. Den hämtar dagens kurser för strategins innehav (bara ett tjugotal aktier, några sekunder) och säljer det som bryter stoppen eller trendreglerna.
 
 ## Anpassa
 

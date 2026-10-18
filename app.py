@@ -519,6 +519,27 @@ def status_rader() -> list[dict]:
         ok = (dt.date.today() - senast).days <= 9
         rader.append({"namn": "Kurser", "datum": senast, "ok": ok,
                       "text": "" if ok else "gamla kurser – kör screenern eller Uppdatera kurser"})
+    # Strategierna: beslutas vid veckokörningen, daglig stopp varje vardag
+    try:
+        tillst = {sid: st.las_tillstand(st.mapp(UTMAPP, sid)) for sid in st.STRATEGIER}
+        startade = {sid: t for sid, t in tillst.items() if t}
+        if startade:
+            senast = max(t["senaste_rapport"] for t in startade.values())
+            ok = (dt.date.today() - dt.date.fromisoformat(senast)).days <= 8
+            rader.append({"namn": "Strategier", "datum": dt.date.fromisoformat(senast), "ok": ok,
+                          "text": f"{len(startade)} av {len(st.STRATEGIER)} startade" if ok else
+                          f"inga beslut sedan {senast} – kontrollera logg.txt"})
+            for sid, t in startade.items():
+                if st.inst(sid)["dagligt"]:
+                    dag = t.get("senaste_dag")
+                    ok = bool(dag) and dt.date.fromisoformat(dag) >= dagar[-1]
+                    rader.append({"namn": st.STRATEGIER[sid]["namn"], "datum": dt.date.fromisoformat(dag) if dag else None,
+                                  "ok": ok or not dag and (dt.date.today() - dt.date.fromisoformat(t["start"])).days <= 3,
+                                  "text": "daglig kontroll" if ok else
+                                  ("väntar på första dagliga körningen" if not dag else
+                                   f"ingen daglig kontroll sedan {dag} – kontrollera cron och strategier_logg.txt")})
+    except Exception:
+        pass
     _status_cache.update(tid=time.time(), rader=rader)
     return rader
 
@@ -546,6 +567,7 @@ STATUS_MALL = """
 <pre class="small" style="white-space:pre-wrap;margin:0">crontab -l
 tail -30 {{ utmapp }}/nyckeltal_logg.txt
 tail -30 {{ utmapp }}/logg.txt
+tail -30 {{ utmapp }}/strategier_logg.txt
 timedatectl | grep "Time zone"</pre></div>
 """
 
@@ -1051,7 +1073,9 @@ def ta_bort_affar(idx: int):
 # ---------------------------------------------------------------------------
 # Strategier – virtuella portföljer (pappershandel), se strategier.py
 # ---------------------------------------------------------------------------
-STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "egen": "#b0489c"}
+STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "kvalitet": "#8a63d2",
+              "topp10": "#c9a227", "utan_urval": "#3fa7c9", "daglig_stopp": "#d4566a", "slump": "#9aa0a6",
+              "egen": "#b0489c"}
 
 
 def graf_flera(serier: list[tuple[str, pd.Series, str, float]], B: int = 860) -> str:
@@ -1101,11 +1125,12 @@ def graf_flera(serier: list[tuple[str, pd.Series, str, float]], B: int = 860) ->
     for _, s, farg, bredd in serier:
         p = [(x(i), y(v)) for i, v in s.items()]
         if len(p) >= 2:
+            streck = ' stroke-dasharray="5 4"' if farg == "var(--muted)" else ""  # index streckat
             delar.append(f'<path d="M{" L".join(f"{a:.1f},{b:.1f}" for a, b in p)}" fill="none" stroke="{farg}" '
-                         f'stroke-width="{bredd}" stroke-linejoin="round"/>')
+                         f'stroke-width="{bredd}" stroke-linejoin="round"{streck}/>')
         delar.append(f'<circle cx="{p[-1][0]:.1f}" cy="{p[-1][1]:.1f}" r="3.5" fill="{farg}"/>')
-    forklaring = " ".join(f'<span style="white-space:nowrap;margin-right:12px"><span style="color:{f}">━</span> '
-                          f'{html.escape(n)}</span>' for n, _, f, _ in serier)
+    forklaring = " ".join(f'<span style="white-space:nowrap;margin-right:12px"><span style="color:{f}">'
+                          f'{"╍" if f == "var(--muted)" else "━"}</span> {html.escape(n)}</span>' for n, _, f, _ in serier)
     return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Strategiernas utveckling">'
             f'{"".join(delar)}</svg></div><p class="small muted" style="margin:6px 0 0">{forklaring}</p>')
 
@@ -1139,7 +1164,8 @@ def _egen_serie(k: pd.DataFrame, fran: pd.Timestamp) -> pd.Series | None:
 STRATEGIER_MALL = """
 <h1>Strategier</h1>
 <p class="muted">Låtsasportföljer som följer varje strategi exakt, utan riktiga pengar. Varje lördag efter
-veckorapporten säljer de det reglerna säger sälj och köper gröna rader (köpläge) tills de äger {{ max }} aktier.
+veckorapporten säljer de det reglerna säger sälj och köper gröna rader (köpläge) tills de är fulla
+({{ max }} aktier om inget annat anges).
 Start {{ start|kr }} per strategi, lika vikt, courtage {{ (courtage * 100)|round(2) }} % (minst {{ ct_min|round|int }} kr)
 och {{ (spread * 100)|round(2) }} % spread på varje affär.</p>
 
@@ -1158,7 +1184,7 @@ eller direkt med <code>./venv/bin/python strategier.py</code>.</div>
 {% if r.startad %}
 <td class="num">{{ r.varde|kr }}</td><td class="num {{ r.avkastning|klass }}">{{ r.avkastning|pct }}</td>
 <td class="num {{ r.mot_index|klass }}">{{ r.mot_index|pct }}</td>
-<td class="num">{{ r.antal }}/{{ max }}</td><td class="num">{{ r.kassa|kr }}</td><td class="num">{{ r.affarer }}</td>
+<td class="num">{{ r.antal }}/{{ r.max_innehav }}</td><td class="num">{{ r.kassa|kr }}</td><td class="num">{{ r.affarer }}</td>
 <td class="num">{{ r.stat.traffsakerhet|pct(false) if r.stat.antal else '–' }}</td><td class="num">{{ r.courtage|kr }}</td>
 <td class="small">{{ r.tillstand.start }}</td>
 {% else %}<td colspan="9" class="muted small">{{ r.vantar }}</td>{% endif %}
@@ -1181,7 +1207,8 @@ STRATEGI_MALL = """
 <p class="small"><a href="{{ url_for('strategier_sida') }}">← Alla strategier</a></p>
 <h1><span style="color:{{ farg }}">●</span> {{ s.namn }}</h1>
 <p class="muted">{{ s.kort }}. Startad {{ t.start }} · senaste beslut {{ t.senaste_rapport }}
-{% if t.senaste_nyckeltal %} · nyckeltal från {{ t.senaste_nyckeltal }}{% endif %}. Nästa beslut vid veckokörningen på lördag.</p>
+{% if t.senaste_nyckeltal %} · nyckeltal från {{ t.senaste_nyckeltal }}{% endif %}. Nästa beslut vid veckokörningen på lördag.
+{% if s.dagligt %}Stopp och trendregler kontrolleras dessutom varje vardag – senast {{ t.senaste_dag or 'inte än' }}.{% endif %}</p>
 
 <div class="stats">
 <div class="stat" style="border-color:{{ farg }}"><span class="muted small">Värde</span><b>{{ varde|kr }}</b>
@@ -1234,7 +1261,7 @@ STRATEGI_MALL = """
 
 
 def _vantar_text(sid: str) -> str:
-    if st.STRATEGIER[sid]["nyckeltal"]:
+    if st.inst(sid)["nyckeltal"]:
         return "Startar vid nästa veckokörning (kräver nyckeltal från senaste veckan)."
     return "Startar vid nästa veckokörning."
 
@@ -1294,11 +1321,12 @@ def strategi_sida(sid: str):
         if tab is not None:
             if "bolag" not in tab.columns:
                 tab["bolag"] = tab["ticker"].map(sc.bolagsnyckel)
-            nyck = st.las_nyckeltal(UTMAPP, dt.date.today()) if st.STRATEGIER[sid]["nyckeltal"] else None
+            nyck = st.las_nyckeltal(UTMAPP, dt.date.today()) if st.inst(sid)["nyckeltal"] else None
             rank = st.rangordna(sid, tab, nyck)
     except Exception:
         rank = None
-    analys = ih.analysera(inn, k, rank) if len(inn) else []
+    S = st.inst(sid)
+    analys = ih.analysera(inn, k, rank, {"STOPP_PROCENT": S["stopp"], "SALJ_RANK": S["salj_rank"] or 10**9}) if len(inn) else []
     v = st.vardeserie(UTMAPP, sid, k, demo)
     idx = _indexserie(k, v.index[0]) if len(v) else None
     avk = float(v["avkastning"].iloc[-1]) if len(v) else 0.0
@@ -1316,10 +1344,10 @@ def strategi_sida(sid: str):
         r["resultat"] = res.pop(0) if r["handling"] == "SÄLJ" and res else None
         rader.append(r)
     kostnad = float(logg["courtage"].sum() + (logg["brutto"] * st.SPREAD / (1 + st.SPREAD)).sum()) if len(logg) else 0.0
-    return sida(st.STRATEGIER[sid]["namn"], "strategier", STRATEGI_MALL, s=st.STRATEGIER[sid], t=t, farg=farg,
+    return sida(S["namn"], "strategier", STRATEGI_MALL, s=S, t=t, farg=farg,
                 varde=float(v["varde"].iloc[-1]) if len(v) else t["kassa"], avk=avk, index_avk=index_avk,
                 mot_index=avk - index_avk if index_avk is not None else None, indexnamn=indexnamn,
-                analys=analys, max=st.MAX_INNEHAV, stat=ih.affarsstatistik(avsl), graf=graf,
+                analys=analys, max=S["max_innehav"], stat=ih.affarsstatistik(avsl), graf=graf,
                 logg=list(reversed(rader)), kostnad=kostnad)
 
 

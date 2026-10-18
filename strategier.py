@@ -20,10 +20,15 @@ Regler, samma som du själv följer:
   - Lika vikt: varje köp är 1/20 av portföljens värde (eller den kassa som finns kvar).
   - Courtage och spread dras på varje affär.
 
-Strategier (bestämda i förväg, se README):
-  momentum_v1  Momentum v1: veckorapporten som den är
-  b            Momentum utan de 20 % dyraste i varje sektor (värderingspoäng)
-  c            70 % momentum + 30 % värdering
+Strategier (bestämda i förväg, se STRATEGIER nedan och README):
+  momentum_v1   Momentum v1: veckorapporten som den är
+  b             Momentum utan de 20 % dyraste i varje sektor (värderingspoäng)
+  c             70 % momentum + 30 % värdering
+  kvalitet      70 % momentum + 30 % kvalitet
+  topp10        10 innehav, plats 1-10, säljs utanför topp 20
+  utan_urval    topp 20 utan urvalsreglerna
+  daglig_stopp  som Momentum v1, men SÄLJ-reglerna kollas varje vardag (strategier.py --dagligt)
+  slump         20 slumpvisa bland godkända – visar hur mycket som är tur
 
 Filer: <utmapp>/strategier/<id>/
   innehav.csv     nuvarande innehav (samma format som din innehav.csv)
@@ -35,6 +40,7 @@ Körning:
   Körs automatiskt i slutet av screener.py. Manuellt:
     ./venv/bin/python strategier.py            # kör senaste veckorapporten om den inte redan körts
     ./venv/bin/python strategier.py --status   # visa ställningen
+    ./venv/bin/python strategier.py --dagligt  # daglig kontroll (cron vardagar 18:45)
 """
 
 from __future__ import annotations
@@ -64,13 +70,40 @@ SPREAD = 0.001                  # halva skillnaden köp/sälj: köp 0,1 % över,
 MIN_KOP_SEK = 1_000.0           # köp inte rester mindre än så
 NYCKELTAL_MAX_ALDER = 7         # dagar: B och C kräver nyckeltal högst så gamla
 
+# Varje strategi är bestämd i förväg. Ändra aldrig en strategi som redan körs – lägg till en ny version.
+# Inställningar som inte anges tas från STANDARD.
+STANDARD = {
+    "nyckeltal": False,     # kräver nyckeltal från senaste veckan
+    "max_innehav": MAX_INNEHAV,
+    "kop_plats": KOP_PLATS,  # köp bara plats 1..kop_plats
+    "krav_urval": True,      # köp bara gröna rader (urvalsreglerna)
+    "salj_rank": 40,         # sälj vid månadsgenomgång om plats > salj_rank (None = ingen rankningsregel)
+    "stopp": 0.20,           # släpande stopp
+    "ordning": "plats",      # "plats" = i rankningsordning, "slump" = slumpvis bland godkända
+    "dagligt": False,        # SÄLJ-reglerna (stopp, MA200, MA50) kollas varje vardag, inte bara lördag
+}
 STRATEGIER = {
-    "momentum_v1": {"namn": "Momentum v1", "kort": "Veckorapporten som den är", "nyckeltal": False},
+    "momentum_v1": {"namn": "Momentum v1", "kort": "Veckorapporten som den är"},
     "b": {"namn": "B: utan dyraste 20 %", "kort": "Momentum, men hoppar över de 20 % dyraste i varje sektor",
           "nyckeltal": True},
     "c": {"namn": "C: 70/30 momentum/värde", "kort": "Rangordnas på 70 % momentumpoäng + 30 % värderingspoäng",
           "nyckeltal": True},
+    "kvalitet": {"namn": "Momentum + kvalitet", "kort": "Rangordnas på 70 % momentumpoäng + 30 % kvalitetspoäng",
+                 "nyckeltal": True},
+    "topp10": {"namn": "Topp 10", "kort": "Bara 10 innehav (plats 1–10), dubbel vikt, säljs utanför topp 20",
+               "max_innehav": 10, "kop_plats": 10, "salj_rank": 20},
+    "utan_urval": {"namn": "Utan urvalsregler", "kort": "Köper topp 20 även om de är uttänjda, volatila eller tunna",
+                   "krav_urval": False},
+    "daglig_stopp": {"namn": "Daglig stopp", "kort": "Som Momentum v1, men stopp och trendregler kollas varje vardag",
+                     "dagligt": True},
+    "slump": {"namn": "Slumpportfölj", "kort": "20 slumpvisa bland godkända, samma säljregler – måttstock för tur",
+              "ordning": "slump", "krav_urval": False, "salj_rank": None},
 }
+
+
+def inst(sid: str) -> dict:
+    """Strategins inställningar inklusive standardvärden."""
+    return {**STANDARD, **STRATEGIER[sid]}
 
 LOGG_KOLUMNER = ["datum", "rapport", "handling", "ticker", "antal", "kurs", "brutto", "courtage", "utdelning",
                  "kassaflode", "kassa_efter", "plats", "bas", "orsak"]
@@ -136,8 +169,11 @@ def las_nyckeltal(utmapp: Path, datum: dt.date) -> pd.DataFrame | None:
     # Värderingspoängens percentil inom gruppen, räknat på unika bolag (100 = billigast)
     unika = df.dropna(subset=["varde_poang"]).drop_duplicates("bolag").copy()
     unika["varde_pct"] = unika.groupby("grupp")["varde_poang"].rank(pct=True) * 100
+    kval = df.dropna(subset=["kvalitet_poang"]).drop_duplicates("bolag").copy()
+    kval["kval_pct"] = kval.groupby("grupp")["kvalitet_poang"].rank(pct=True) * 100
     df = df.merge(unika[["bolag", "varde_pct"]], on="bolag", how="left")
-    ut = df[["ticker", "varde_poang", "varde_pct", "grupp"]].copy()
+    df = df.merge(kval[["bolag", "kval_pct"]], on="bolag", how="left")
+    ut = df[["ticker", "varde_poang", "varde_pct", "kval_pct", "grupp"]].copy()
     ut.attrs["fil"] = filer[-1].stem
     return ut
 
@@ -146,11 +182,14 @@ def rangordna(sid: str, tabell: pd.DataFrame, nyckeltal: pd.DataFrame | None) ->
     """Returnerar tabellen med strategins egna kolumner godkand, plats och poang (samma namn som
     screenern, så att innehav.analysera kan användas oförändrad)."""
     t = tabell.copy()
-    if sid == "momentum_v1":
+    if sid == "slump":
+        t["plats"] = np.nan  # ingen rangordning – köpen lottas, och plats används inte vid sälj
         return t
+    if not inst(sid)["nyckeltal"]:
+        return t  # samma rangordning som veckorapporten
     if nyckeltal is None:
         raise ValueError("nyckeltal saknas")
-    t = t.merge(nyckeltal[["ticker", "varde_pct"]], on="ticker", how="left")
+    t = t.merge(nyckeltal[["ticker", "varde_pct", "kval_pct"]], on="ticker", how="left")
     if sid == "b":
         # De 20 % dyraste i sin sektor räknas som "klarar inte filtret". Saknas poäng tas aktien inte bort.
         dyr = t["varde_pct"].notna() & (t["varde_pct"] <= 20)
@@ -159,6 +198,8 @@ def rangordna(sid: str, tabell: pd.DataFrame, nyckeltal: pd.DataFrame | None) ->
     elif sid == "c":
         # Saknas värderingspoäng räknas den som medel (50)
         t["poang"] = np.where(t["godkand"], 0.7 * t["poang"] + 0.3 * t["varde_pct"].fillna(50), np.nan)
+    elif sid == "kvalitet":
+        t["poang"] = np.where(t["godkand"], 0.7 * t["poang"] + 0.3 * t["kval_pct"].fillna(50), np.nan)
     t = t.sort_values(["godkand", "poang"], ascending=[False, False]).reset_index(drop=True)
     t["plats"] = np.nan
     t.loc[t["godkand"], "plats"] = range(1, int(t["godkand"].sum()) + 1)
@@ -218,31 +259,45 @@ def portfoljvarde(innehav: pd.DataFrame, kurser: pd.DataFrame, logg: pd.DataFram
     return v
 
 
-def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurser: pd.DataFrame,
-                 nyckeltal: pd.DataFrame | None, demo: bool = False) -> str:
-    """Kör en veckas beslut för en strategi. Returnerar en rad text för loggen."""
+def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | None, kurser: pd.DataFrame,
+                 nyckeltal: pd.DataFrame | None, demo: bool = False, dagligt: bool = False) -> str:
+    """Kör en veckas beslut för en strategi. Returnerar en rad text för loggen.
+    dagligt=True: bara SÄLJ-reglerna (stopp, MA200, MA50) med dagens kurser – inga köp, ingen
+    månadsgenomgång, ingen trimning. rapport är då dagens datum."""
+    S = inst(sid)
+    regler = {"STOPP_PROCENT": S["stopp"], "SALJ_RANK": S["salj_rank"] or 10**9}
     m = mapp(utmapp, sid, demo)
     t = las_tillstand(m)
     rdatum = dt.date.fromisoformat(rapport)
-    if t and t["senaste_rapport"] >= rapport:
+    if dagligt:
+        if t is None:
+            return f"{sid}: inte startad"
+        if t.get("senaste_dag", "") >= rapport:
+            return f"{sid}: {rapport} redan kontrollerad"
+    elif t and t["senaste_rapport"] >= rapport:
         return f"{sid}: {rapport} redan körd"
-    if STRATEGIER[sid]["nyckeltal"] and nyckeltal is None:
+    if S["nyckeltal"] and nyckeltal is None and not dagligt:
         return f"{sid}: väntar – inga nyckeltal från de senaste {NYCKELTAL_MAX_ALDER} dagarna"
     if t is None:
         t = {"startkapital": STARTKAPITAL, "kassa": STARTKAPITAL, "start": rapport, "senaste_rapport": "",
              "senaste_manad": rapport[:7], "namn": STRATEGIER[sid]["namn"]}
         manadsgenomgang = False  # inga innehav att granska första gången
     else:
-        manadsgenomgang = rapport[:7] != t["senaste_manad"]
+        manadsgenomgang = rapport[:7] != t["senaste_manad"] and not dagligt
 
     k = kurser[kurser.index <= pd.Timestamp(rdatum)]
+    inn = ih.las_innehav(m / "innehav.csv")
     # Handelsdagen = senaste dagen med kurs för de flesta aktierna. kurser.csv kan ha en rad för
     # idag eller en helgdag med bara några få aktier (efter "Uppdatera kurser" på webbsidan).
-    breda = k[[c for c in tabell["ticker"] if c in k.columns]].notna().sum(axis=1)
+    bas_tickers = list(inn["ticker"]) if dagligt else list(tabell["ticker"])
+    breda = k[[c for c in bas_tickers if c in k.columns]].notna().sum(axis=1)
     handelsdag = breda[breda >= 0.5 * breda.max()].index.max() if len(breda) and breda.max() > 0 else k.index.max()
+    if dagligt and t.get("senaste_handelsdag", "") >= str(handelsdag.date()):
+        t["senaste_dag"] = rapport
+        skriv_tillstand(m, t)
+        return f"{sid}: inga nya kurser sedan {t['senaste_handelsdag']}"
     t.setdefault("start_handelsdag", str(handelsdag.date()))
-    rank = rangordna(sid, tabell, nyckeltal)
-    inn = ih.las_innehav(m / "innehav.csv")
+    rank = None if dagligt else rangordna(sid, tabell, nyckeltal)
     avsl = ih.las_affarer(m / "avslutade.csv")
     logg = las_logg(m)
     kassa = float(t["kassa"])
@@ -280,35 +335,51 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kur
         inn.loc[idx, "antal"] = h["antal"] - antal
 
     # 1. Försäljningar enligt säljreglerna
-    analys = ih.analysera(inn, k, rank) if len(inn) else []
+    analys = ih.analysera(inn, k, rank, regler) if len(inn) else []
     for i, a in enumerate(analys):
         b = a.get("beslut")
-        if b == "SÄLJ":
-            salj(i, inn.loc[i, "antal"], "; ".join(a["signaler"]), a.get("plats"))
+        if a.get("signaler"):  # SÄLJ – även när innehavet samtidigt är för stort (TRIMMA)
+            salj(i, inn.loc[i, "antal"], ("daglig kontroll: " if dagligt else "") + "; ".join(a["signaler"]), a.get("plats"))
         elif b == "SÄLJ VID MÅNADSGENOMGÅNG" and manadsgenomgang:
             salj(i, inn.loc[i, "antal"], "månadsgenomgång: " + "; ".join(a["manad"]), a.get("plats"))
     inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
 
+    if dagligt:
+        return _spara(sid, m, t, inn, avsl, alla_logg(), nya_avsl, nya_logg, kassa, handelsdag,
+                      dict(senaste_dag=rapport, senaste_handelsdag=str(handelsdag.date())), "dagligt")
+
     # 2. Trimning ned till jämn vikt
     if len(inn):
         total = kassa + portfoljvarde(inn, k, logg)
-        mal = total / MAX_INNEHAV
-        for i, a in enumerate(ih.analysera(inn, k, rank)):
+        mal = total / S["max_innehav"]
+        for i, a in enumerate(ih.analysera(inn, k, rank, regler)):
             if a.get("beslut") == "TRIMMA" and pd.notna(a.get("varde_sek")):
                 antal = math.floor((a["varde_sek"] - mal) / a["kurs"])
                 if antal >= 1:
                     salj(i, antal, f"trimning: {a['andel'] * 100:.0f} % av portföljen", a.get("plats"))
         inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
 
-    # 3. Köp: gröna rader (plats <= 20 och urval), som inte redan ägs, i platsordning
+    # 3. Köp: gröna rader (plats <= kop_plats och urval), som inte redan ägs, i platsordning
     agda_bolag = {_bolag(x) for x in inn["ticker"]}
-    kandidater = rank[(rank["plats"] <= KOP_PLATS) & rank["urval"].astype(bool)].sort_values("plats")
+    if S["ordning"] == "slump":
+        # Lottas bland godkända. Fröet är strategi + datum, så samma körning ger alltid samma lottning.
+        import zlib
+        pool = rank[rank["godkand"].astype(bool)]
+        if S["krav_urval"]:
+            pool = pool[pool["urval"].astype(bool)]
+        rng = np.random.default_rng(zlib.crc32(f"{sid}{rapport}".encode()))
+        kandidater = pool.iloc[rng.permutation(len(pool))]
+    else:
+        valj = rank["plats"] <= S["kop_plats"]
+        if S["krav_urval"]:
+            valj &= rank["urval"].astype(bool)
+        kandidater = rank[valj].sort_values("plats")
     salda = {r["ticker"] for r in nya_logg if r["handling"] == "SÄLJ"}  # köps inte tillbaka samma vecka
     kandidater = kandidater[~kandidater["bolag"].fillna(kandidater["ticker"]).isin(agda_bolag)
                             & ~kandidater["ticker"].isin(set(inn["ticker"]) | salda)]
-    lediga = MAX_INNEHAV - len(inn)
+    lediga = S["max_innehav"] - len(inn)
     total = kassa + portfoljvarde(inn, k, logg)
-    mal = total / MAX_INNEHAV
+    mal = total / S["max_innehav"]
     nya_rader = []
     for r in kandidater.head(max(lediga, 0)).itertuples():
         stang = _kurs(k, r.ticker)
@@ -324,31 +395,38 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kur
             break
         ct = courtage(brutto)
         kassa -= brutto + ct
+        plats = int(r.plats) if pd.notna(r.plats) else None
+        orsak = (f"plats {plats}, {'grön rad' if S['krav_urval'] else 'topp ' + str(S['kop_plats'])}"
+                 if plats else "lottad bland godkända")
         nya_rader.append({"ticker": r.ticker, "typ": "momentum", "kopdatum": handelsdag,
                           "kopkurs": (brutto + ct) / antal, "antal": antal, "valuta": "SEK",
-                          "notering": f"plats {int(r.plats)}"})
-        logga("KÖP", r.ticker, antal, pris, brutto, ct, -(brutto + ct), int(r.plats), f"plats {int(r.plats)}, grön rad",
-              bas=stang)
+                          "notering": f"plats {plats}" if plats else "lottad"})
+        logga("KÖP", r.ticker, antal, pris, brutto, ct, -(brutto + ct), plats, orsak, bas=stang)
     if nya_rader:
         inn = pd.concat([inn, pd.DataFrame(nya_rader)], ignore_index=True)
 
-    # Spara
+    upd = dict(senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_handelsdag=str(handelsdag.date()))
+    if nyckeltal is not None and S["nyckeltal"]:
+        upd["senaste_nyckeltal"] = nyckeltal.attrs.get("fil", "")
+    return _spara(sid, m, t, inn, avsl, alla_logg(), nya_avsl, nya_logg, kassa, handelsdag, upd,
+                  "månadsgenomgång" if manadsgenomgang else "")
+
+
+def _spara(sid, m, t, inn, avsl, logg, nya_avsl, nya_logg, kassa, handelsdag, upd: dict, extra: str) -> str:
     m.mkdir(parents=True, exist_ok=True)
+    inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
     ih.skriv_innehav(m / "innehav.csv", inn)
     if nya_avsl:
         avsl = pd.concat([avsl, pd.DataFrame(nya_avsl)], ignore_index=True)
     ih.skriv_affarer(m / "avslutade.csv", avsl)
-    logg = alla_logg()
     ut = logg.copy()
     ut["datum"] = pd.to_datetime(ut["datum"]).dt.strftime("%Y-%m-%d")
     _skriv_csv(ut.reindex(columns=LOGG_KOLUMNER), m / "logg.csv")
-    t.update(kassa=kassa, senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_handelsdag=str(handelsdag.date()))
-    if nyckeltal is not None and STRATEGIER[sid]["nyckeltal"]:
-        t["senaste_nyckeltal"] = nyckeltal.attrs.get("fil", "")
+    t.update(kassa=kassa, **upd)
     skriv_tillstand(m, t)
     kop = sum(1 for r in nya_logg if r["handling"] == "KÖP")
     sal = len(nya_logg) - kop
-    return (f"{sid}: {kop} köp, {sal} försäljningar{' (månadsgenomgång)' if manadsgenomgang else ''}, "
+    return (f"{sid}: {kop} köp, {sal} försäljningar{f' ({extra})' if extra else ''}, "
             f"{len(inn)} innehav, kassa {kassa:,.0f} kr".replace(",", " "))
 
 
@@ -380,10 +458,42 @@ def kor_alla(utmapp: Path, demo: bool = False, rapportfil: Path | None = None) -
                 tabell = pd.read_csv(f)
                 if "bolag" not in tabell.columns:
                     tabell["bolag"] = tabell["ticker"].map(_bolag)
-                nk = las_nyckeltal(utmapp, dt.date.fromisoformat(rapport)) if STRATEGIER[sid]["nyckeltal"] else None
+                nk = las_nyckeltal(utmapp, dt.date.fromisoformat(rapport)) if inst(sid)["nyckeltal"] else None
                 ut.append(kor_strategi(sid, utmapp, rapport, tabell, kurser, nk, demo))
             except Exception as fel:  # en strategi som felar får inte stoppa de andra
                 ut.append(f"{sid}: FEL {type(fel).__name__}: {fel}")
+    return ut
+
+
+def kor_dagligt(utmapp: Path, demo: bool = False) -> list[str]:
+    """Daglig kontroll för strategier med dagligt=True: hämtar dagens kurser för deras innehav
+    (och index) och säljer det som bryter stoppen eller trendreglerna. Köp sker bara på lördagar."""
+    import screener as sc
+    utmapp = Path(utmapp)
+    sids = [sid for sid in STRATEGIER if inst(sid)["dagligt"] and las_tillstand(mapp(utmapp, sid, demo))]
+    if not sids:
+        return ["Ingen strategi med daglig kontroll har startat än."]
+    tickers = sorted({t for sid in sids for t in ih.las_innehav(mapp(utmapp, sid, demo) / "innehav.csv")["ticker"]})
+    kursfil = utmapp / "kurser.csv"
+    if tickers and not demo:
+        try:
+            nya = sc.hamta_kurser(tickers + [ih.JAMFORELSEINDEX], sc.KONFIG["historik"])
+        except Exception as fel:  # t.ex. inget nät – kontrollera med de kurser som finns
+            print(f"Kunde inte hämta kurser: {type(fel).__name__}: {fel}", file=sys.stderr)
+            nya = {}
+        if nya:
+            ih.skriv_kurser(kursfil, ih.slå_ihop_kurser(ih.las_kurser(kursfil), {t: d["Close"] for t, d in nya.items()}))
+        saknas = [t for t in tickers if t not in nya]
+        if saknas:
+            print(f"Inga nya kurser för: {', '.join(saknas)}", file=sys.stderr)
+    kurser = ih.las_kurser(kursfil)
+    idag = dt.date.today().isoformat()
+    ut = []
+    for sid in sids:
+        try:
+            ut.append(kor_strategi(sid, utmapp, idag, None, kurser, None, demo, dagligt=True))
+        except Exception as fel:
+            ut.append(f"{sid}: FEL {type(fel).__name__}: {fel}")
     return ut
 
 
@@ -436,7 +546,7 @@ def oversikt(utmapp: Path, kurser: pd.DataFrame, demo: bool = False) -> list[dic
     for sid, s in STRATEGIER.items():
         m = mapp(utmapp, sid, demo)
         t = las_tillstand(m)
-        rad = {"id": sid, **s, "startad": t is not None, "tillstand": t or {}}
+        rad = {"id": sid, **inst(sid), "startad": t is not None, "tillstand": t or {}}
         if t:
             v = vardeserie(utmapp, sid, kurser, demo)
             inn = ih.las_innehav(m / "innehav.csv")
@@ -456,8 +566,15 @@ def main() -> int:
     p.add_argument("--utmapp", default=os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"]))
     p.add_argument("--demo", action="store_true", help="skriv till strategier_demo/")
     p.add_argument("--status", action="store_true", help="visa ställningen, kör inget")
+    p.add_argument("--dagligt", action="store_true",
+                   help="daglig kontroll av stopp/trend för strategier med dagligt=True (cron vardagar)")
     a = p.parse_args()
     utmapp = Path(a.utmapp).expanduser()
+    if a.dagligt:
+        print(f"{dt.datetime.now():%Y-%m-%d %H:%M} daglig kontroll")
+        for rad in kor_dagligt(utmapp, a.demo):
+            print(rad)
+        return 0
     if not a.status:
         for rad in kor_alla(utmapp, a.demo):
             print(rad)

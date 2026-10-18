@@ -143,9 +143,11 @@ def _avk(s: pd.Series, bak: int, hoppa: int = 0) -> float:
     return s.iloc[-1 - hoppa] / s.iloc[-1 - bak] - 1
 
 
-def analysera(innehav: pd.DataFrame, kurser: pd.DataFrame, screener: pd.DataFrame | None) -> list[dict]:
-    """Räknar fram nyckeltal och säljsignaler för varje innehav."""
-    r = REGLER
+def analysera(innehav: pd.DataFrame, kurser: pd.DataFrame, screener: pd.DataFrame | None,
+              regler: dict | None = None) -> list[dict]:
+    """Räknar fram nyckeltal och säljsignaler för varje innehav.
+    regler: andra värden än REGLER (används av strategiportföljerna i strategier.py)."""
+    r = {**REGLER, **(regler or {})}
     rank = {}
     if screener is not None and len(screener):
         for row in screener.itertuples():
