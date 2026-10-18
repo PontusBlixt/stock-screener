@@ -73,6 +73,8 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `senaste.html` | Senaste veckorapporten, skrivs över varje vecka | – |
 | `kurser.csv` | Stängningskurser för grafer och utveckling | Ja – återskapas vid nästa körning |
 | `backup/` | Säkerhetskopior från Avanza-importen. Bara de 10 senaste per fil behålls, äldre raderas automatiskt | Ja |
+| `strategier/<strategi>/` | Strategiernas låtsasportföljer: innehav, affärslogg och tillstånd | Nej – raderas den börjar strategin om från noll |
+| `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
 | `.sok_historik.json` | Senaste sökningarna på Sök-sidan | Ja |
 
@@ -103,6 +105,7 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 - **Aktiesida** – två flikar. *Översikt*: kursgraf med MA50, MA200, köpkurs och stoppnivå, momentum och status för varje säljregel. *Nyckeltal*: värderings- och kvalitetspoäng mot sektorn, varje mått med sektormedian, analytikerdata, rapportdatum och ägande (se nedan). Adressen `…/aktie/VOLV-B.ST#nyckeltal` öppnar fliken direkt.
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
 - **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag, och har samma Nyckeltal-flik som aktiesidan. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
+- **Strategier** – låtsasportföljer som följer varje strategi exakt, utan riktiga pengar (se *Strategier* nedan). Graf och tabell jämför strategierna med varandra, med din egen momentumportfölj och med index. Klicka på en strategi för dess innehav, beslut och affärslogg.
 - **Arkiv** – tidigare veckorapporter, även som .md.
 - **Status** (knappen *Data* uppe till höger) – visar om insamlingen går som den ska. Knappen är grön när allt är aktuellt och blir röd med namnet på det som släpar när:
   - **Nyckeltal** har missat mer än en handelsdag. Dagens fil räknas först efter kl. 19, eftersom cron kör 18:30.
@@ -217,7 +220,7 @@ De korrigerade värdena räknas fram från råsiffrorna varje gång historiken l
 
 ### Värderings- och kvalitetspoäng (under utvärdering)
 
-Visas i fliken Nyckeltal. **Poängen påverkar inte rankningen, köpreglerna eller säljreglerna** – `screener.py` och `innehav.py` läser aldrig nyckeltalen. Under testperioden ska bara Översikt styra köp och försäljningar, så att utvärderingen av momentum blir ren.
+Visas i fliken Nyckeltal. **Poängen påverkar inte rankningen, köpreglerna eller säljreglerna** – `screener.py` och `innehav.py` läser aldrig nyckeltalen. Bara låtsasportföljerna B och C i `strategier.py` använder dem – aldrig veckorapporten eller dina egna säljsignaler. Under testperioden ska bara Översikt styra köp och försäljningar, så att utvärderingen av momentum blir ren.
 
 Definitionen är bestämd i förväg (funktionen `poang()` i `nyckeltal.py`), så att ett kommande backtest testar exakt detta:
 
@@ -231,6 +234,41 @@ Definitionen är bestämd i förväg (funktionen `poang()` i `nyckeltal.py`), s�
 - Planerad utvärdering efter ~6 månader: A) bara momentum, B) momentum men utan de 20 % dyraste i varje sektor, C) 70 % momentum + 30 % värdering. Ändring införs bara om både det historiska backtestet och den egna insamlade datan pekar åt samma håll.
 
 Fält som saknas i äldre dagsfiler (t.ex. analytikerdata före 2026-10-19) visas som "–". Minikurvorna i fliken visas när minst fem dagars historik finns.
+
+## Strategier: låtsasportföljer (pappershandel)
+
+Det enda sättet att veta om en strategi fungerar är att se den gå framåt i tiden, där ingen kan ha facit i efterhand. Varje strategi har därför en egen låtsasportfölj som sköts av `strategier.py`. Den körs automatiskt i slutet av `screener.py` varje lördag – ingen extra cron-rad behövs – och rör aldrig `innehav.csv` eller `affarer.csv`.
+
+**Reglerna är desamma som du följer:**
+
+- Boten beslutar en gång i veckan, på samma kurser som veckorapporten (fredagens stängning).
+- Den säljer bara det reglerna säger: **SÄLJ** direkt (stopp, MA200, MA50 under MA200), **SÄLJ VID MÅNADSGENOMGÅNG** vid första körningen i en ny månad, och **TRIMMA** ned till jämn vikt. BEHÅLL och BEVAKA behålls.
+- Den köper bara gröna rader (köpläge: plats 1–20 och klarar urvalsreglerna), i platsordning, tills den äger 20 aktier. Finns det färre gröna än lediga platser köps bara de som finns, och resten ligger kvar som kassa till nästa vecka. Äger den redan 20 som ska behållas händer ingenting.
+- En aktie som säljs köps inte tillbaka samma vecka. Bara ett aktieslag per bolag.
+- Startkapital 100 000 kr, lika vikt (varje köp är 1/20 av portföljens värde), hela aktier.
+- Courtage 0,25 %, minst 1 kr (Avanza Mini), och 0,1 % spread på varje köp och sälj. Ändra `COURTAGE_PROCENT`, `COURTAGE_MINIMUM` och `SPREAD` överst i `strategier.py` om din courtageklass är en annan.
+- Utdelningar räknas som återinvesterade (Yahoos justerade kurser), precis som på Utveckling-sidan.
+
+**Strategierna** – de tre som förregistrerats under *Värderings- och kvalitetspoäng*:
+
+| | Strategi | Skillnad mot veckorapporten |
+|---|---|---|
+| A | Momentum v1 | Ingen – exakt veckorapporten |
+| B | Utan dyraste 20 % | Aktier bland de 20 % dyraste i sin sektor räknas som "klarar inte filtret" och får ingen plats |
+| C | 70/30 momentum/värde | Rangordnas på 70 % momentumpoäng + 30 % värderingspoäng (percentil inom sektorn) |
+
+B och C behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie värderingspoäng tas den inte bort i B och räknas som medel (50) i C.
+
+**Starta nu** i stället för att vänta till lördag (startar på den senaste veckorapporten):
+
+```bash
+cd ~/screener && ./venv/bin/python strategier.py
+./venv/bin/python strategier.py --status   # visa ställningen utan att köra
+```
+
+En strategi börjar på den rapport som finns när den startas – historiken spelas inte upp i efterhand, eftersom det vore ett backtest och inte ett framåttest. Om veckokörningen missas en lördag kör boten ikapp de rapporter den missat nästa gång, i datumordning.
+
+**Lägga till en strategi senare:** lägg till den i `STRATEGIER` och i `rangordna()` i `strategier.py`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
 
 ## Köra automatiskt varje vecka
 

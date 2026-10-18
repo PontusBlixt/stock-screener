@@ -7,6 +7,7 @@ Sidor:
   /               veckans screener-rapport (senaste.html)
   /innehav        dina innehav med säljsignaler – lägg till och ta bort här
   /aktie/<ticker> kursgraf och nyckeltal för en aktie (innehav eller kandidat)
+  /strategier     virtuella strategiportföljer (pappershandel), se strategier.py
   /arkiv          tidigare veckorapporter
 
 Start:
@@ -40,6 +41,7 @@ import ikoner
 import innehav as ih
 import nyckeltal as nk
 import screener as sc
+import strategier as st
 
 UTMAPP = Path(os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"])).expanduser()
 INNEHAV_FIL = UTMAPP / "innehav.csv"
@@ -280,7 +282,7 @@ nav.botten { display:none }
   main table td.atgard { justify-content:flex-end; gap:16px; padding-top:8px !important }
   main table td.tom { display:none !important }
   main table tr.urval { background:var(--urval, var(--kort)) }
-  nav.botten { display:grid; grid-template-columns:repeat(5,1fr); position:fixed; left:0; right:0; bottom:0; z-index:50;
+  nav.botten { display:grid; grid-template-columns:repeat(6,1fr); position:fixed; left:0; right:0; bottom:0; z-index:50;
                background:var(--kort); border-top:1px solid var(--linje);
                padding:6px 4px calc(6px + env(safe-area-inset-bottom)) }
   nav.botten a { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:11px;
@@ -304,11 +306,12 @@ _IKON = {
     "rapport": '<path d="M7 3h7l5 5v13H7z M14 3v5h5 M10 13h6 M10 17h6"/>',
     "innehav": '<path d="M4 8h16v12H4z M9 8V5h6v3 M4 13h16"/>',
     "utveckling": '<path d="M4 19h16 M5 15l4-4 3 3 7-7 M15 7h4v4"/>',
+    "strategier": '<path d="M9 3h6 M10 3v6l-5 9.5A1.7 1.7 0 0 0 6.5 21h11a1.7 1.7 0 0 0 1.5-2.5L14 9V3 M7.5 15h9"/>',
     "sok": '<path d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z M15.5 15.5L20 20"/>',
     "arkiv": '<path d="M4 5h16v4H4z M5 9v10h14V9 M10 13h4"/>',
 }
 _MENY = [("rapport", "/", "Rapport"), ("innehav", "/innehav", "Innehav"), ("utveckling", "/utveckling", "Utveckling"),
-         ("sok", "/sok", "Sök"), ("arkiv", "/arkiv", "Arkiv")]
+         ("strategier", "/strategier", "Strategier"), ("sok", "/sok", "Sök"), ("arkiv", "/arkiv", "Arkiv")]
 
 
 def botten_nav(aktiv: str) -> str:
@@ -370,6 +373,7 @@ BAS = """<!doctype html><html lang="sv"><head><meta charset="utf-8">
 <a href="{{ url_for('rapport') }}" class="{{ 'aktiv' if sida=='rapport' }}">Veckans rapport</a>
 <a href="{{ url_for('innehav_sida') }}" class="{{ 'aktiv' if sida=='innehav' }}">Mina innehav</a>
 <a href="{{ url_for('utveckling_sida') }}" class="{{ 'aktiv' if sida=='utveckling' }}">Utveckling</a>
+<a href="{{ url_for('strategier_sida') }}" class="{{ 'aktiv' if sida=='strategier' }}">Strategier</a>
 <a href="{{ url_for('sok_sida') }}" class="{{ 'aktiv' if sida=='sok' }}">Sök</a>
 <a href="{{ url_for('arkiv') }}" class="{{ 'aktiv' if sida=='arkiv' }}">Arkiv</a>{{ status|safe }}</div></nav>
 <main>
@@ -558,7 +562,7 @@ def status_sida():
 NAV_INJEKTION = """<nav class="topp" style="background:var(--kort);border-bottom:1px solid var(--linje)">
 <div style="max-width:1200px;margin:0 auto;padding:10px 16px;display:flex;gap:20px;flex-wrap:wrap">
 <b>📈 Screener</b><a href="/" style="color:var(--text);font-weight:600;text-decoration:none">Veckans rapport</a>
-<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/sok" style="color:var(--accent);text-decoration:none">Sök</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
+<a href="/innehav" style="color:var(--accent);text-decoration:none">Mina innehav</a><a href="/utveckling" style="color:var(--accent);text-decoration:none">Utveckling</a><a href="/strategier" style="color:var(--accent);text-decoration:none">Strategier</a><a href="/sok" style="color:var(--accent);text-decoration:none">Sök</a><a href="/arkiv" style="color:var(--accent);text-decoration:none">Arkiv</a></div></nav>"""
 
 LANK_SKRIPT = """<script>
 document.querySelectorAll('[data-t]').forEach(function(el){
@@ -1044,6 +1048,281 @@ def ta_bort_affar(idx: int):
 # ---------------------------------------------------------------------------
 # Import från Avanza
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Strategier – virtuella portföljer (pappershandel), se strategier.py
+# ---------------------------------------------------------------------------
+STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "egen": "#b0489c"}
+
+
+def graf_flera(serier: list[tuple[str, pd.Series, str, float]], B: int = 860) -> str:
+    """Flera linjer i procent med nollinje. serier = [(namn, serie, färg, linjebredd)]."""
+    serier = [(n, s.dropna(), f, w) for n, s, f, w in serier if s is not None and len(s.dropna())]
+    if not serier:
+        return ""
+    H, VM, HM, TM, BM = (300, 56, 16, 14, 28) if B >= 600 else (280, 62, 10, 14, 28)
+    alla = pd.concat([s for _, s, _, _ in serier])
+    lo, hi = min(0.0, float(alla.min())), max(0.0, float(alla.max()))
+    pad = (hi - lo) * 0.08 or 0.01
+    lo, hi = lo - pad, hi + pad
+    t0 = min(s.index[0] for _, s, _, _ in serier).value
+    t1 = max(s.index[-1] for _, s, _, _ in serier).value
+    if t1 == t0:
+        return "<p class='muted'>Grafen visas när strategin funnits i minst två handelsdagar.</p>"
+
+    def x(t):
+        return VM + (pd.Timestamp(t).value - t0) / (t1 - t0) * (B - VM - HM)
+
+    def y(v):
+        return TM + (hi - v) / (hi - lo) * (H - TM - BM)
+
+    delar = []
+    spann = hi - lo
+    steg = 10 ** math.floor(math.log10(spann / 4))
+    for m in (1, 2, 5, 10):
+        if spann / (steg * m) <= 6:
+            steg *= m
+            break
+    v = math.ceil(lo / steg) * steg
+    while v <= hi:
+        delar.append(f'<line x1="{VM}" x2="{B - HM}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
+                     f'stroke="var(--{"muted" if abs(v) < 1e-12 else "linje"})"/>'
+                     f'<text x="{VM - 8}" y="{y(v) + 4:.1f}" text-anchor="end" font-size="11" fill="var(--muted)">'
+                     f'{v * 100:+.0f}{"%" if B < 600 else " %"}</text>')
+        v += steg
+    forsta, sista = pd.Timestamp(t0), pd.Timestamp(t1)
+    dagar = (sista - forsta).days
+    etiketter = pd.date_range(forsta, sista, freq="MS" if dagar > 75 else "W-MON")
+    maxant = 12 if B >= 600 else 5
+    if len(etiketter) > maxant:
+        etiketter = etiketter[::math.ceil(len(etiketter) / maxant)]
+    for t in etiketter:
+        delar.append(f'<text x="{x(t):.1f}" y="{H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">'
+                     f'{t.strftime("%b %y" if dagar > 75 else "%d %b")}</text>')
+    for _, s, farg, bredd in serier:
+        p = [(x(i), y(v)) for i, v in s.items()]
+        if len(p) >= 2:
+            delar.append(f'<path d="M{" L".join(f"{a:.1f},{b:.1f}" for a, b in p)}" fill="none" stroke="{farg}" '
+                         f'stroke-width="{bredd}" stroke-linejoin="round"/>')
+        delar.append(f'<circle cx="{p[-1][0]:.1f}" cy="{p[-1][1]:.1f}" r="3.5" fill="{farg}"/>')
+    forklaring = " ".join(f'<span style="white-space:nowrap;margin-right:12px"><span style="color:{f}">━</span> '
+                          f'{html.escape(n)}</span>' for n, _, f, _ in serier)
+    return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Strategiernas utveckling">'
+            f'{"".join(delar)}</svg></div><p class="small muted" style="margin:6px 0 0">{forklaring}</p>')
+
+
+def strat_mapp_demo() -> bool:
+    return DEMO and st.rotmapp(UTMAPP, True).exists()
+
+
+def _indexserie(k: pd.DataFrame, fran: pd.Timestamp) -> pd.Series | None:
+    if ih.JAMFORELSEINDEX not in k.columns:
+        return None
+    s = k[ih.JAMFORELSEINDEX].ffill()
+    s = s[s.index >= fran].dropna()
+    return s / s.iloc[0] - 1 if len(s) else None
+
+
+def _egen_serie(k: pd.DataFrame, fran: pd.Timestamp) -> pd.Series | None:
+    """Din egen momentumdel, omräknad så att den startar på 0 samma dag som strategierna."""
+    try:
+        u = ih.utveckling(ih.las_innehav(INNEHAV_FIL), ih.las_affarer(AFFAR_FIL), k, ["momentum"])
+    except Exception:
+        return None
+    if len(u) < 2:
+        return None
+    fore = u[u.index <= fran]
+    bas = 1 + (fore["avkastning"].iloc[-1] if len(fore) else 0.0)
+    u = u[u.index >= fran]
+    return (1 + u["avkastning"]) / bas - 1 if len(u) else None
+
+
+STRATEGIER_MALL = """
+<h1>Strategier</h1>
+<p class="muted">Låtsasportföljer som följer varje strategi exakt, utan riktiga pengar. Varje lördag efter
+veckorapporten säljer de det reglerna säger sälj och köper gröna rader (köpläge) tills de äger {{ max }} aktier.
+Start {{ start|kr }} per strategi, lika vikt, courtage {{ (courtage * 100)|round(2) }} % (minst {{ ct_min|round|int }} kr)
+och {{ (spread * 100)|round(2) }} % spread på varje affär.</p>
+
+{% if not startade %}
+<div class="card">Ingen strategi har startat än. De startar automatiskt vid nästa veckokörning,
+eller direkt med <code>./venv/bin/python strategier.py</code>.</div>
+{% else %}
+<div class="card" style="margin:16px 0">{{ graf|safe }}</div>
+<div class="wrap"><table style="min-width:900px">
+<thead><tr><th>Strategi</th><th class="num">Värde</th><th class="num">Avkastning</th><th class="num">Mot index</th>
+<th class="num">Innehav</th><th class="num">Kassa</th><th class="num">Affärer</th><th class="num">Träffsäkerhet</th>
+<th class="num">Courtage</th><th>Startad</th></tr></thead><tbody>
+{% for r in rader %}<tr>
+<td style="min-width:200px"><a href="{{ url_for('strategi_sida', sid=r.id) }}"><b><span style="color:{{ r.farg }}">●</span> {{ r.namn }}</b></a>
+<div class="muted small">{{ r.kort }}</div></td>
+{% if r.startad %}
+<td class="num">{{ r.varde|kr }}</td><td class="num {{ r.avkastning|klass }}">{{ r.avkastning|pct }}</td>
+<td class="num {{ r.mot_index|klass }}">{{ r.mot_index|pct }}</td>
+<td class="num">{{ r.antal }}/{{ max }}</td><td class="num">{{ r.kassa|kr }}</td><td class="num">{{ r.affarer }}</td>
+<td class="num">{{ r.stat.traffsakerhet|pct(false) if r.stat.antal else '–' }}</td><td class="num">{{ r.courtage|kr }}</td>
+<td class="small">{{ r.tillstand.start }}</td>
+{% else %}<td colspan="9" class="muted small">{{ r.vantar }}</td>{% endif %}
+</tr>{% endfor %}
+{% if egen_avk is not none %}<tr><td><a href="{{ url_for('utveckling_sida') }}"><b><span style="color:{{ farg_egen }}">●</span> Din momentumportfölj</b></a>
+<div class="muted small">Dina riktiga affärer, samma period</div></td>
+<td class="num">–</td><td class="num {{ egen_avk|klass }}">{{ egen_avk|pct }}</td><td class="num {{ egen_mot|klass }}">{{ egen_mot|pct }}</td>
+<td colspan="6"></td></tr>{% endif %}
+<tr><td><b><span style="color:var(--muted)">●</span> {{ indexnamn }}</b><div class="muted small">Jämförelseindex</div></td>
+<td class="num">–</td><td class="num {{ index_avk|klass }}">{{ index_avk|pct }}</td><td colspan="7"></td></tr>
+</tbody></table></div>
+<p class="small muted">Avkastningen räknas från varje strategis startdag och index från den tidigaste starten.
+Strategierna får utdelningar (räknas som återinvesterade, samma kurser som Utveckling-sidan), medan
+{{ indexnamn }} är ett prisindex utan utdelningar – index ser därför runt 3 procentenheter per år sämre ut än det är.
+Jämförelsen mellan strategierna är helt rättvis. Det krävs flera månader innan skillnaderna betyder något.</p>
+{% endif %}
+"""
+
+STRATEGI_MALL = """
+<p class="small"><a href="{{ url_for('strategier_sida') }}">← Alla strategier</a></p>
+<h1><span style="color:{{ farg }}">●</span> {{ s.namn }}</h1>
+<p class="muted">{{ s.kort }}. Startad {{ t.start }} · senaste beslut {{ t.senaste_rapport }}
+{% if t.senaste_nyckeltal %} · nyckeltal från {{ t.senaste_nyckeltal }}{% endif %}. Nästa beslut vid veckokörningen på lördag.</p>
+
+<div class="stats">
+<div class="stat" style="border-color:{{ farg }}"><span class="muted small">Värde</span><b>{{ varde|kr }}</b>
+<span class="small {{ avk|klass }}">{{ avk|pct }} sedan start</span></div>
+<div class="stat"><span class="muted small">Mot {{ indexnamn }}</span><b class="{{ mot_index|klass }}">{{ mot_index|pct }}</b>
+<span class="small muted">index {{ index_avk|pct }}</span></div>
+<div class="stat"><span class="muted small">Innehav</span><b>{{ analys|length }}/{{ max }}</b><span class="small muted">kassa {{ t.kassa|kr }}</span></div>
+<div class="stat"><span class="muted small">Avslutade affärer</span><b>{{ stat.antal }}</b>
+<span class="small muted">{% if stat.antal %}{{ stat.traffsakerhet|pct(false) }} med vinst{% endif %}</span></div>
+{% if stat.antal %}<div class="stat"><span class="muted small">Snittvinst / snittförlust</span>
+<b><span class="pos">{{ stat.snittvinst|pct }}</span> <span class="neg">{{ stat.snittforlust|pct }}</span></b></div>{% endif %}
+<div class="stat"><span class="muted small">Courtage + spread</span><b>{{ kostnad|kr }}</b></div>
+</div>
+
+<div class="card" style="margin:16px 0">{{ graf|safe }}</div>
+
+<h2>Innehav</h2>
+{% if analys %}
+<div class="wrap"><table style="min-width:960px">
+<thead><tr><th>Aktie</th><th>Beslut</th><th class="num">Antal</th><th class="num">Köpkurs</th><th class="num">Kurs</th>
+<th class="num">Resultat</th><th class="num">Värde</th><th class="num">Från högsta</th><th class="num">Till stopp</th>
+<th class="num">Plats</th><th style="min-width:220px">Orsak</th></tr></thead><tbody>
+{% for a in analys %}<tr>
+<td><a style="white-space:nowrap" href="{{ url_for('aktie', ticker=a.ticker) }}"><b>{{ a.ticker|kort }}</b></a>
+<div class="muted small">{{ a.kopdatum|datum }}</div></td>
+<td><span class="badge {{ a.beslut|bklass }}">{{ a.beslut }}</span></td>
+<td class="num">{{ a.antal|tal(0) }}</td><td class="num">{{ a.kopkurs|tal }}</td><td class="num">{{ a.kurs|tal }}</td>
+<td class="num {{ a.resultat|klass }}">{{ a.resultat|pct }}</td><td class="num">{{ a.varde_sek|kr }}</td>
+<td class="num {{ a.fran_hogsta|klass }}">{{ a.fran_hogsta|pct }}</td><td class="num">{{ a.till_stopp|pct }}</td>
+<td class="num">{% if a.plats %}{{ a.plats }}{% elif a.i_screener %}<span class="neg">ej godk.</span>{% else %}–{% endif %}</td>
+<td class="small">{{ (a.signaler + a.manad + a.bevaka + (['för stor andel – trimmas'] if a.trimma else []))|join('; ') }}</td>
+</tr>{% endfor %}</tbody></table></div>
+<p class="small muted">Beslutet visar läget med dagens kurser. Boten agerar bara vid veckokörningen, precis som du.</p>
+{% else %}<div class="card muted">Inga innehav – inga gröna rader fanns vid senaste beslutet. Kassan väntar till nästa vecka.</div>{% endif %}
+
+<h2>Affärslogg</h2>
+{% if logg %}
+<div class="wrap"><table style="min-width:860px">
+<thead><tr><th>Datum</th><th>Handling</th><th>Aktie</th><th class="num">Antal</th><th class="num">Kurs</th>
+<th class="num">Belopp</th><th class="num">Courtage</th><th class="num">Resultat</th><th>Orsak</th></tr></thead><tbody>
+{% for r in logg %}<tr>
+<td class="small">{{ r.datum|datum }}</td>
+<td><span class="badge {{ 'behall' if r.handling == 'KÖP' else 'salj' }}">{{ r.handling }}</span></td>
+<td><a href="{{ url_for('aktie', ticker=r.ticker) }}"><b>{{ r.ticker|kort }}</b></a></td>
+<td class="num">{{ r.antal|tal(0) }}</td><td class="num">{{ r.kurs|tal }}</td><td class="num">{{ r.brutto|kr }}</td>
+<td class="num">{{ r.courtage|tal }}</td><td class="num {{ r.resultat|klass }}">{{ r.resultat|pct if r.resultat is not none else '' }}</td>
+<td class="small">{{ r.orsak }}</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<div class="card muted">Inga affärer ännu.</div>{% endif %}
+"""
+
+
+def _vantar_text(sid: str) -> str:
+    if st.STRATEGIER[sid]["nyckeltal"]:
+        return "Startar vid nästa veckokörning (kräver nyckeltal från senaste veckan)."
+    return "Startar vid nästa veckokörning."
+
+
+@app.route("/strategier")
+def strategier_sida():
+    demo = strat_mapp_demo()
+    k = kurser()
+    rader = st.oversikt(UTMAPP, k, demo)
+    startade = [r for r in rader if r["startad"] and len(r["serie"])]
+    graf = ""
+    egen_avk = egen_mot = index_avk = None
+    if startade:
+        fran = min(r["serie"].index[0] for r in startade)
+        idx = _indexserie(k, fran)
+        egen = _egen_serie(k, fran)
+        index_avk = float(idx.iloc[-1]) if idx is not None else None
+        for r in rader:
+            r["farg"] = STRAT_FARG.get(r["id"], "var(--accent)")
+            r["vantar"] = _vantar_text(r["id"])
+            if r["startad"] and len(r["serie"]):
+                i2 = _indexserie(k, r["serie"].index[0])
+                r["mot_index"] = r["avkastning"] - float(i2.iloc[-1]) if i2 is not None else None
+        if egen is not None:
+            egen_avk = float(egen.iloc[-1])
+            egen_mot = egen_avk - index_avk if index_avk is not None else None
+        serier = [(ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX), idx, "var(--muted)", 1.5)]
+        if egen is not None:
+            serier.append(("Din momentumportfölj", egen, STRAT_FARG["egen"], 1.8))
+        serier += [(r["namn"], r["serie"]["avkastning"], r["farg"], 2.2) for r in startade]
+        graf = dubbel(graf_flera, serier)
+    else:
+        for r in rader:
+            r["farg"] = STRAT_FARG.get(r["id"], "var(--accent)")
+            r["vantar"] = _vantar_text(r["id"])
+    return sida("Strategier", "strategier", STRATEGIER_MALL, rader=rader, startade=bool(startade), graf=graf,
+                egen_avk=egen_avk, egen_mot=egen_mot, index_avk=index_avk, farg_egen=STRAT_FARG["egen"],
+                indexnamn=ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX), max=st.MAX_INNEHAV,
+                start=st.STARTKAPITAL, courtage=st.COURTAGE_PROCENT, ct_min=st.COURTAGE_MINIMUM, spread=st.SPREAD)
+
+
+@app.route("/strategi/<sid>")
+def strategi_sida(sid: str):
+    if sid not in st.STRATEGIER:
+        abort(404)
+    demo = strat_mapp_demo()
+    m = st.mapp(UTMAPP, sid, demo)
+    t = st.las_tillstand(m)
+    if t is None:
+        flash(f"{st.STRATEGIER[sid]['namn']} har inte startat än.", "fel")
+        return redirect(url_for("strategier_sida"))
+    k = kurser()
+    inn = ih.las_innehav(m / "innehav.csv")
+    rank = None
+    try:
+        tab = screener_tabell()
+        if tab is not None:
+            if "bolag" not in tab.columns:
+                tab["bolag"] = tab["ticker"].map(sc.bolagsnyckel)
+            nyck = st.las_nyckeltal(UTMAPP, dt.date.today()) if st.STRATEGIER[sid]["nyckeltal"] else None
+            rank = st.rangordna(sid, tab, nyck)
+    except Exception:
+        rank = None
+    analys = ih.analysera(inn, k, rank) if len(inn) else []
+    v = st.vardeserie(UTMAPP, sid, k, demo)
+    idx = _indexserie(k, v.index[0]) if len(v) else None
+    avk = float(v["avkastning"].iloc[-1]) if len(v) else 0.0
+    index_avk = float(idx.iloc[-1]) if idx is not None else None
+    farg = STRAT_FARG.get(sid, "var(--accent)")
+    indexnamn = ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX)
+    graf = dubbel(graf_flera, [(indexnamn, idx, "var(--muted)", 1.5),
+                               (st.STRATEGIER[sid]["namn"], v["avkastning"] if len(v) else None, farg, 2.2)])
+    logg = st.las_logg(m)
+    avsl = ih.las_affarer(m / "avslutade.csv")
+    # Resultat per försäljning (inklusive kostnader), matchat mot avslutade affärer i samma ordning
+    res = list(avsl["saljkurs"] / avsl["kopkurs"] - 1)
+    rader = []
+    for r in logg.to_dict("records"):
+        r["resultat"] = res.pop(0) if r["handling"] == "SÄLJ" and res else None
+        rader.append(r)
+    kostnad = float(logg["courtage"].sum() + (logg["brutto"] * st.SPREAD / (1 + st.SPREAD)).sum()) if len(logg) else 0.0
+    return sida(st.STRATEGIER[sid]["namn"], "strategier", STRATEGI_MALL, s=st.STRATEGIER[sid], t=t, farg=farg,
+                varde=float(v["varde"].iloc[-1]) if len(v) else t["kassa"], avk=avk, index_avk=index_avk,
+                mot_index=avk - index_avk if index_avk is not None else None, indexnamn=indexnamn,
+                analys=analys, max=st.MAX_INNEHAV, stat=ih.affarsstatistik(avsl), graf=graf,
+                logg=list(reversed(rader)), kostnad=kostnad)
+
+
 IMPORT_MALL = """
 <p class="small"><a href="{{ url_for('innehav_sida') }}">← Mina innehav</a></p>
 <h1>Importera från Avanza</h1>

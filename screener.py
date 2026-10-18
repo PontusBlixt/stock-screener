@@ -22,7 +22,8 @@ Körning:
   python3 screener.py                                   # vanlig körning
   python3 screener.py --utmapp ~/test                   # annan mapp för rapporterna
 
-Dina innehav läses från innehav.csv i utmappen (se innehav.py) och får
+Dina innehav läses från innehav.csv i 
+utmappen (se innehav.py) och får
 säljsignaler i rapporten.
   python3 screener.py --demo                            # testa utan internet (påhittad data)
 
@@ -259,7 +260,8 @@ def bedom_en(ticker: str, n: dict, tabell: pd.DataFrame | None, salj_rank: int =
     plats = poang = None
     n_godk = 0
     if godkand and tabell is not None and len(tabell):
-        ovriga = tabell[tabell["godkand"].astype(bool) & (tabell["ticker"] != ticker)]
+        godk = tabell["godkand"].astype(str).str.lower().isin(["true", "1"])
+        ovriga = tabell[godk & (tabell["ticker"] != ticker)].dropna(subset=["mom_12_1", "mom_6m"])
         n_godk = len(ovriga) + 1
         m12 = pd.concat([ovriga["mom_12_1"], pd.Series([n["mom_12_1"]])], ignore_index=True)
         m6 = pd.concat([ovriga["mom_6m"], pd.Series([n["mom_6m"]])], ignore_index=True)
@@ -267,9 +269,12 @@ def bedom_en(ticker: str, n: dict, tabell: pd.DataFrame | None, salj_rank: int =
         poang = float(p.iloc[-1])
         ovr = p.iloc[:-1].to_numpy()
         # Lika poäng: samma ordning som i veckorapporten; en aktie som inte fanns där hamnar efter.
-        egen = tabell.loc[tabell["ticker"] == ticker, "plats"]
-        egen_plats = float(egen.iloc[0]) if len(egen) and pd.notna(egen.iloc[0]) else np.inf
-        fore = ovriga["plats"].to_numpy(dtype=float) < egen_plats
+        if "plats" in tabell.columns:
+            egen = tabell.loc[tabell["ticker"] == ticker, "plats"]
+            egen_plats = float(egen.iloc[0]) if len(egen) and pd.notna(egen.iloc[0]) else np.inf
+            fore = pd.to_numeric(ovriga["plats"], errors="coerce").to_numpy(dtype=float) < egen_plats
+        else:  # veckorapport från en äldre version utan platskolumn
+            fore = np.zeros(len(ovriga), dtype=bool)
         plats = int((ovr > poang).sum() + ((ovr == poang) & fore).sum()) + 1
         regel(plats <= K["topp_n"], f"Topp {K['topp_n']} i rankningen",
               f"plats {plats} av {n_godk} (poäng {poang:.0f})", bevaka=plats <= salj_rank)
@@ -645,6 +650,14 @@ def main() -> int:
     for f in filer:
         print(f"Sparad: {f}", file=sys.stderr)
     print(f"Sparad: {utmapp / 'senaste.html'}", file=sys.stderr)
+
+    # Virtuella strategiportföljer (pappershandel). Ett fel här får aldrig stoppa veckorapporten.
+    try:
+        import strategier
+        for rad in strategier.kor_alla(utmapp, a.demo):
+            print(f"Strategi {rad}", file=sys.stderr)
+    except Exception as fel:
+        print(f"Strategierna kunde inte köras: {type(fel).__name__}: {fel}", file=sys.stderr)
     return 0
 
 
