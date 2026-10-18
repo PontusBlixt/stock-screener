@@ -8,6 +8,7 @@ Sidor:
   /innehav        dina innehav med säljsignaler – lägg till och ta bort här
   /aktie/<ticker> kursgraf och nyckeltal för en aktie (innehav eller kandidat)
   /strategier     virtuella strategiportföljer (pappershandel), se strategier.py
+  /backtest       resultat från backtest.py
   /arkiv          tidigare veckorapporter
 
 Start:
@@ -1162,7 +1163,8 @@ def _egen_serie(k: pd.DataFrame, fran: pd.Timestamp) -> pd.Series | None:
 
 
 STRATEGIER_MALL = """
-<h1>Strategier</h1>
+<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+<h1>Strategier</h1><a href="{{ url_for('backtest_sida') }}"><b>Backtest – hur hade det gått tidigare? →</b></a></div>
 <p class="muted">Låtsasportföljer som följer varje strategi exakt, utan riktiga pengar. Varje lördag efter
 veckorapporten säljer de det reglerna säger sälj och köper gröna rader (köpläge) tills de är fulla
 ({{ max }} aktier om inget annat anges).
@@ -1204,10 +1206,12 @@ Jämförelsen mellan strategierna är helt rättvis. Det krävs flera månader i
 """
 
 STRATEGI_MALL = """
-<p class="small"><a href="{{ url_for('strategier_sida') }}">← Alla strategier</a></p>
+{% if bt %}<p class="small"><a href="{{ url_for('backtest_sida', kor=bt.namn) }}">← Backtest {{ bt.fran }} – {{ bt.till }}</a></p>
+<div class="flash fel" style="margin-bottom:12px">Backtest – vad som hade hänt om boten startat {{ bt.fran }}. Inte riktig pappershandel.</div>
+{% else %}<p class="small"><a href="{{ url_for('strategier_sida') }}">← Alla strategier</a></p>{% endif %}
 <h1><span style="color:{{ farg }}">●</span> {{ s.namn }}</h1>
 <p class="muted">{{ s.kort }}. Startad {{ t.start }} · senaste beslut {{ t.senaste_rapport }}
-{% if t.senaste_nyckeltal %} · nyckeltal från {{ t.senaste_nyckeltal }}{% endif %}. Nästa beslut vid veckokörningen på lördag.
+{% if t.senaste_nyckeltal %} · nyckeltal från {{ t.senaste_nyckeltal }}{% endif %}.{% if not bt %} Nästa beslut vid veckokörningen på lördag.{% endif %}
 {% if s.dagligt %}Stopp och trendregler kontrolleras dessutom varje vardag – senast {{ t.senaste_dag or 'inte än' }}.{% endif %}</p>
 
 <div class="stats">
@@ -1241,7 +1245,7 @@ STRATEGI_MALL = """
 <td class="num">{% if a.plats %}{{ a.plats }}{% elif a.i_screener %}<span class="neg">ej godk.</span>{% else %}–{% endif %}</td>
 <td class="small">{{ (a.signaler + a.manad + a.bevaka + (['för stor andel – trimmas'] if a.trimma else []))|join('; ') }}</td>
 </tr>{% endfor %}</tbody></table></div>
-<p class="small muted">Beslutet visar läget med dagens kurser. Boten agerar bara vid veckokörningen, precis som du.</p>
+<p class="small muted">{% if bt %}Innehaven när backtestet slutade, med beslutet som gällde då.{% else %}Beslutet visar läget med dagens kurser. Boten agerar bara vid veckokörningen, precis som du.{% endif %}</p>
 {% else %}<div class="card muted">Inga innehav – inga gröna rader fanns vid senaste beslutet. Kassan väntar till nästa vecka.</div>{% endif %}
 
 <h2>Affärslogg</h2>
@@ -1308,33 +1312,41 @@ def strategi_sida(sid: str):
     if sid not in st.STRATEGIER:
         abort(404)
     demo = strat_mapp_demo()
-    m = st.mapp(UTMAPP, sid, demo)
-    t = st.las_tillstand(m)
-    if t is None:
+    if st.las_tillstand(st.mapp(UTMAPP, sid, demo)) is None:
         flash(f"{st.STRATEGIER[sid]['namn']} har inte startat än.", "fel")
         return redirect(url_for("strategier_sida"))
-    k = kurser()
+    tab = screener_tabell()
+    nyck = None
+    if st.inst(sid)["nyckeltal"]:
+        try:
+            nyck = st.las_nyckeltal(UTMAPP, dt.date.today())
+        except Exception:
+            nyck = None
+    return _strategi_vy(UTMAPP, kurser(), sid, tab, nyck, demo)
+
+
+def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = False, bt: dict | None = None) -> str:
+    S = st.inst(sid)
+    m = st.mapp(bas, sid, demo)
+    t = st.las_tillstand(m)
     inn = ih.las_innehav(m / "innehav.csv")
     rank = None
     try:
-        tab = screener_tabell()
         if tab is not None:
             if "bolag" not in tab.columns:
                 tab["bolag"] = tab["ticker"].map(sc.bolagsnyckel)
-            nyck = st.las_nyckeltal(UTMAPP, dt.date.today()) if st.inst(sid)["nyckeltal"] else None
             rank = st.rangordna(sid, tab, nyck)
     except Exception:
         rank = None
-    S = st.inst(sid)
     analys = ih.analysera(inn, k, rank, {"STOPP_PROCENT": S["stopp"], "SALJ_RANK": S["salj_rank"] or 10**9}) if len(inn) else []
-    v = st.vardeserie(UTMAPP, sid, k, demo)
+    v = st.vardeserie(bas, sid, k, demo)
     idx = _indexserie(k, v.index[0]) if len(v) else None
     avk = float(v["avkastning"].iloc[-1]) if len(v) else 0.0
     index_avk = float(idx.iloc[-1]) if idx is not None else None
     farg = STRAT_FARG.get(sid, "var(--accent)")
     indexnamn = ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX)
     graf = dubbel(graf_flera, [(indexnamn, idx, "var(--muted)", 1.5),
-                               (st.STRATEGIER[sid]["namn"], v["avkastning"] if len(v) else None, farg, 2.2)])
+                               (S["namn"], v["avkastning"] if len(v) else None, farg, 2.2)])
     logg = st.las_logg(m)
     avsl = ih.las_affarer(m / "avslutade.csv")
     # Resultat per försäljning (inklusive kostnader), matchat mot avslutade affärer i samma ordning
@@ -1344,11 +1356,133 @@ def strategi_sida(sid: str):
         r["resultat"] = res.pop(0) if r["handling"] == "SÄLJ" and res else None
         rader.append(r)
     kostnad = float(logg["courtage"].sum() + (logg["brutto"] * st.SPREAD / (1 + st.SPREAD)).sum()) if len(logg) else 0.0
-    return sida(S["namn"], "strategier", STRATEGI_MALL, s=S, t=t, farg=farg,
+    return sida(S["namn"], "strategier", STRATEGI_MALL, s=S, t=t, farg=farg, bt=bt,
                 varde=float(v["varde"].iloc[-1]) if len(v) else t["kassa"], avk=avk, index_avk=index_avk,
                 mot_index=avk - index_avk if index_avk is not None else None, indexnamn=indexnamn,
                 analys=analys, max=S["max_innehav"], stat=ih.affarsstatistik(avsl), graf=graf,
                 logg=list(reversed(rader)), kostnad=kostnad)
+
+
+# ---------------------------------------------------------------------------
+# Backtest – resultat från backtest.py
+# ---------------------------------------------------------------------------
+BACKTEST_MAPP = UTMAPP / "backtest"
+_bt_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+
+
+def backtest_korningar() -> list[dict]:
+    if not BACKTEST_MAPP.exists():
+        return []
+    ut = []
+    for d in BACKTEST_MAPP.iterdir():
+        f = d / "info.json"
+        if d.is_dir() and f.exists():
+            try:
+                ut.append({"namn": d.name, **json.loads(f.read_text(encoding="utf-8"))})
+            except Exception:
+                pass
+    return sorted(ut, key=lambda x: (x.get("demo", False), x["manader"]))
+
+
+def bt_kurser(namn: str) -> pd.DataFrame:
+    f = BACKTEST_MAPP / namn / "kurser.csv"
+    mt = f.stat().st_mtime
+    if namn not in _bt_cache or _bt_cache[namn][0] != mt:
+        _bt_cache[namn] = (mt, ih.las_kurser(f))
+    return _bt_cache[namn][1]
+
+
+BACKTEST_MALL = """
+<p class="small"><a href="{{ url_for('strategier_sida') }}">← Strategier (framåt, på riktigt)</a></p>
+<h1>Backtest</h1>
+<p class="muted">Vad som hade hänt om strategierna startat tidigare. Samma kod som låtsasportföljerna: varje lördag i
+perioden räknas topplistan fram med bara de kurser som fanns då, och boten fattar sina beslut.</p>
+{% if korningar %}
+<div class="small" style="margin:8px 0 14px">Period:
+{% for b in korningar %}<a href="{{ url_for('backtest_sida', kor=b.namn) }}" style="margin-left:10px;{{ 'font-weight:700;color:var(--text)' if b.namn == bt.namn }}">{{ b.manader }} mån{{ ' (demo)' if b.demo }}</a>{% endfor %}</div>
+<div class="card" style="margin-bottom:16px;border-color:var(--varn-kant, #d9822b)">
+<b>Läs med försiktighet.</b>
+<ul class="small" style="margin:6px 0 0;padding-left:18px">
+<li><b>Överlevnadsfel:</b> bara bolag som är noterade idag ingår. Bolag som gått i konkurs eller avnoterats saknas,
+så alla strategier ser något bättre ut än de hade varit.</li>
+<li><b>En period är ett utfall.</b> Jämför flera längder – en strategi som vinner i alla är mer trovärdig än en som vinner stort i en.</li>
+<li><b>Jämför med slumpportföljen</b>, inte bara index. Ändra inte strategierna efter backtestet – det är framåttestet som avgör.</li>
+<li>{{ bt.hoppade|join(', ') }} kräver historiska nyckeltal och kan inte testas bakåt.</li>
+</ul></div>
+<p class="small muted">{{ bt.fran }} – {{ bt.till }} · {{ bt.veckor }} veckor · {{ bt.aktier }} aktier · kördes {{ bt.skapad|replace('T', ' ') }}</p>
+<div class="card" style="margin:12px 0 16px">{{ graf|safe }}</div>
+<div class="wrap"><table style="min-width:860px">
+<thead><tr><th>Strategi</th><th class="num">Värde</th><th class="num">Avkastning</th><th class="num">Mot index</th>
+<th class="num">Mot slump</th><th class="num">Affärer</th><th class="num">Träffsäkerhet</th><th class="num">Courtage</th>
+<th class="num">Största nedgång</th></tr></thead><tbody>
+{% for r in rader %}<tr>
+<td style="min-width:200px"><a href="{{ url_for('backtest_strategi', kor=bt.namn, sid=r.id) }}"><b><span style="color:{{ r.farg }}">●</span> {{ r.namn }}</b></a>
+<div class="muted small">{{ r.kort }}</div></td>
+<td class="num">{{ r.varde|kr }}</td><td class="num {{ r.avkastning|klass }}">{{ r.avkastning|pct }}</td>
+<td class="num {{ r.mot_index|klass }}">{{ r.mot_index|pct }}</td><td class="num {{ r.mot_slump|klass }}">{{ r.mot_slump|pct if r.id != 'slump' else '–' }}</td>
+<td class="num">{{ r.affarer }}</td><td class="num">{{ r.stat.traffsakerhet|pct(false) if r.stat.antal else '–' }}</td>
+<td class="num">{{ r.courtage|kr }}</td><td class="num neg">{{ r.nedgang|pct }}</td>
+</tr>{% endfor %}
+<tr><td><b><span style="color:var(--muted)">●</span> {{ indexnamn }}</b><div class="muted small">Prisindex, utan utdelningar</div></td>
+<td class="num">–</td><td class="num {{ index_avk|klass }}">{{ index_avk|pct }}</td><td colspan="6"></td></tr>
+</tbody></table></div>
+<p class="small muted">Största nedgång = största fall från en tidigare topp under perioden – hur ont det hade gjort på vägen.</p>
+{% endif %}
+<div class="card" style="margin-top:16px"><h2>Köra ett backtest</h2>
+<p class="small muted" style="margin-top:0">På servern (första gången hämtas 5 års kurser, några minuter):</p>
+<pre class="small" style="white-space:pre-wrap;margin:0">cd ~/screener
+./venv/bin/python backtest.py               # senaste 6 månaderna
+./venv/bin/python backtest.py --manader 12  # senaste året
+./venv/bin/python backtest.py --manader 36  # senaste 3 åren (ca 10 minuter)</pre></div>
+"""
+
+
+def _nedgang(serie: pd.Series) -> float | None:
+    v = serie.dropna()
+    return float((v / v.cummax() - 1).min()) if len(v) else None
+
+
+@app.route("/backtest")
+@app.route("/backtest/<kor>")
+def backtest_sida(kor: str | None = None):
+    korningar = backtest_korningar()
+    if not korningar:
+        return sida("Backtest", "strategier", BACKTEST_MALL, korningar=[], bt=None)
+    vald = next((b for b in korningar if b["namn"] == kor), None) or next(
+        (b for b in korningar if b["manader"] == 6 and not b.get("demo")), korningar[0])
+    bas = BACKTEST_MAPP / vald["namn"]
+    k = bt_kurser(vald["namn"])
+    rader = [r for r in st.oversikt(bas, k) if r["startad"] and len(r["serie"])]
+    indexnamn = ih.INDEXNAMN.get(ih.JAMFORELSEINDEX, ih.JAMFORELSEINDEX)
+    graf, index_avk = "", None
+    if rader:
+        fran = min(r["serie"].index[0] for r in rader)
+        idx = _indexserie(k, fran)
+        index_avk = float(idx.iloc[-1]) if idx is not None else None
+        slump = next((r["avkastning"] for r in rader if r["id"] == "slump"), None)
+        for r in rader:
+            r["farg"] = STRAT_FARG.get(r["id"], "var(--accent)")
+            r["mot_index"] = r["avkastning"] - index_avk if index_avk is not None else None
+            r["mot_slump"] = r["avkastning"] - slump if slump is not None else None
+            r["nedgang"] = _nedgang(r["serie"]["varde"])
+        rader.sort(key=lambda r: -r["avkastning"])
+        graf = dubbel(graf_flera, [(indexnamn, idx, "var(--muted)", 1.5)]
+                      + [(r["namn"], r["serie"]["avkastning"], r["farg"], 2.2) for r in rader])
+    vald = {**vald, "hoppade": [st.STRATEGIER[s]["namn"] for s in vald.get("hoppade_over", []) if s in st.STRATEGIER]}
+    return sida("Backtest", "strategier", BACKTEST_MALL, korningar=korningar, bt=vald, rader=rader, graf=graf,
+                index_avk=index_avk, indexnamn=indexnamn)
+
+
+@app.route("/backtest/<kor>/<sid>")
+def backtest_strategi(kor: str, sid: str):
+    korningar = {b["namn"]: b for b in backtest_korningar()}
+    if kor not in korningar or sid not in st.STRATEGIER:
+        abort(404)
+    bas = BACKTEST_MAPP / kor
+    if st.las_tillstand(st.mapp(bas, sid)) is None:
+        abort(404)
+    tab = ih.senaste_screener(bas)
+    return _strategi_vy(bas, bt_kurser(kor), sid, tab, None, bt=korningar[kor])
 
 
 IMPORT_MALL = """

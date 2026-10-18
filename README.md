@@ -74,6 +74,7 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `kurser.csv` | Stängningskurser för grafer och utveckling | Ja – återskapas vid nästa körning |
 | `backup/` | Säkerhetskopior från Avanza-importen. Bara de 10 senaste per fil behålls, äldre raderas automatiskt | Ja |
 | `strategier/<strategi>/` | Strategiernas låtsasportföljer: innehav, affärslogg och tillstånd | Nej – raderas den börjar strategin om från noll |
+| `backtest/` | Resultat från `backtest.py` (en mapp per period) och 5 års kurser i `backtest/data/` | Ja – skapas om vid nästa backtest |
 | `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
 | `.sok_historik.json` | Senaste sökningarna på Sök-sidan | Ja |
@@ -106,6 +107,7 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
 - **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag, och har samma Nyckeltal-flik som aktiesidan. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
 - **Strategier** – låtsasportföljer som följer varje strategi exakt, utan riktiga pengar (se *Strategier* nedan). Graf och tabell jämför strategierna med varandra, med din egen momentumportfölj och med index. Klicka på en strategi för dess innehav, beslut och affärslogg.
+- **Backtest** (länk överst på Strategier) – hur de prisbaserade strategierna hade gått tidigare, för varje period du kört `backtest.py` för (se *Backtest* nedan).
 - **Arkiv** – tidigare veckorapporter, även som .md.
 - **Status** (knappen *Data* uppe till höger) – visar om insamlingen går som den ska. Knappen är grön när allt är aktuellt och blir röd med namnet på det som släpar när:
   - **Nyckeltal** har missat mer än en handelsdag. Dagens fil räknas först efter kl. 19, eftersom cron kör 18:30.
@@ -277,6 +279,28 @@ cd ~/screener && ./venv/bin/python strategier.py
 En strategi börjar på den rapport som finns när den startas – historiken spelas inte upp i efterhand, eftersom det vore ett backtest och inte ett framåttest. Om veckokörningen missas en lördag kör boten ikapp de rapporter den missat nästa gång, i datumordning.
 
 **Lägga till en strategi senare:** lägg till den i `STRATEGIER` i `strategier.py`. Enkla varianter (antal innehav, köpgräns, säljgräns, stopp, urvalsregler, daglig kontroll) görs bara med inställningarna i `STANDARD`. En ny rangordning behöver också en rad i `rangordna()`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
+
+## Backtest: hur hade det gått tidigare?
+
+`backtest.py` spelar upp strategierna bakåt i tiden med exakt samma kod som låtsasportföljerna. Varje lördag i perioden räknas veckorapportens topplista fram med bara de kurser som fanns då, och boten fattar sina beslut. Daglig stopp kontrolleras varje vardag. Courtage, spread och utdelningar räknas som i låtsasportföljerna.
+
+```bash
+cd ~/screener
+./venv/bin/python backtest.py                # senaste 6 månaderna (ett par minuter)
+./venv/bin/python backtest.py --manader 12   # senaste året
+./venv/bin/python backtest.py --manader 36   # senaste 3 åren (ca 10 minuter)
+```
+
+Första körningen per dag hämtar 5 års kurser och omsättning för alla aktier (några minuter). Resten av dagen återanvänds de. Resultatet visas på webbsidan under **Strategier → Backtest**, med en flik per period du kört, och skrivs också ut i terminalen. Körs samma period igen skrivs den över.
+
+**Bara prisbaserade strategier kan testas bakåt:** Momentum v1, Topp 10, Utan urvalsregler, Daglig stopp och Slumpportfölj. B, C och Momentum + kvalitet behöver nyckeltalen som de såg ut då, och de sparas först sedan oktober 2026. Med dagens nyckeltal skulle testet veta saker som ingen visste då.
+
+**Läs resultatet med försiktighet:**
+
+- **Överlevnadsfel:** tickerlistan innehåller bara bolag som är noterade idag. Bolag som gått i konkurs eller avnoterats under perioden saknas, så alla strategier ser något bättre ut än de hade varit – mer ju längre period.
+- **En period är ett utfall.** Kör flera längder. En strategi som slår slumpportföljen i alla perioder är mer trovärdig än en som vinner stort i en.
+- **Största nedgång** visar hur ont det hade gjort på vägen – viktigt för om du hade orkat följa strategin.
+- **Ändra inte strategierna efter backtestet** och kör om tills det ser bra ut. Då anpassar du strategin efter historiken, och den slutar fungera framåt. Backtestet är ett komplement – framåttestet i fliken Strategier är det som avgör.
 
 ## Köra automatiskt varje vecka
 
