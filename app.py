@@ -2013,21 +2013,37 @@ INSYN_MALL = """
 <div class="stats" style="margin:0 0 12px">
 <div class="stat"><span class="muted small">Blankning</span><b>{{ bl_txt }}</b>
 <span class="small muted">{{ bl_under }}</span></div>
-<div class="stat"><span class="muted small">Insiders 90 dagar</span><b class="{{ netto|klass }}">{{ netto_txt }}</b>
-<span class="small muted">{{ kopare }} köpare · {{ saljare }} säljare</span></div>
+<div class="stat"><span class="muted small">Insiders netto 90 dagar</span><b class="{{ netto|klass }}">{{ netto_txt }}</b>
+<span class="small muted">{{ kopare }} köpare · {{ saljare }} säljare{% if netto_pct is not none %} · {{ netto_pct }} av börsvärdet{% endif %}</span></div>
 </div>
-{% if affarer %}
+{% if personer %}
+<p class="small muted" style="margin:0 0 6px">Senaste 12 månaderna, per person, störst belopp först.</p>
 <div class="wrap"><table>
-<thead><tr><th>Datum</th><th>Person</th><th>Befattning</th><th>Affär</th><th class="num">Antal</th><th class="num">Pris</th><th class="num">Belopp</th></tr></thead>
+<thead><tr><th>Person</th><th>Befattning</th><th class="num">Köpt</th><th class="num">Sålt</th><th class="num">Netto</th>
+<th class="num">Affärer</th><th>Period</th></tr></thead>
+<tbody>{% for r in personer %}<tr>
+<td><b>{{ r.person }}</b>{% if r.narstaende %} <span class="muted small">(närstående)</span>{% endif %}</td>
+<td class="small">{{ r.befattning }}</td>
+<td class="num">{% if r.kop_sek %}{{ (r.kop_sek / 1e6)|tal(2) }} M<div class="muted small">{{ r.kop_antal|tal(0) }} st</div>{% else %}–{% endif %}</td>
+<td class="num">{% if r.salj_sek %}{{ (r.salj_sek / 1e6)|tal(2) }} M<div class="muted small">{{ r.salj_antal|tal(0) }} st</div>{% else %}–{% endif %}</td>
+<td class="num {{ r.netto_sek|klass }}"><b>{{ (r.netto_sek / 1e6)|tal(2) }} M</b></td>
+<td class="num">{{ r.affarer }}</td>
+<td class="small">{{ r.forsta|datum }}{% if r.senaste != r.forsta %} – {{ r.senaste|datum }}{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+<details style="margin-top:10px"><summary class="small" style="cursor:pointer">Alla {{ affarer|length }} affärer</summary>
+<div class="wrap" style="margin-top:8px"><table>
+<thead><tr><th>Datum</th><th>Person</th><th>Affär</th><th class="num">Antal</th><th class="num">Pris</th><th class="num">Belopp</th></tr></thead>
 <tbody>{% for a in affarer %}<tr>
-<td class="small">{{ a.transaktionsdatum|datum }}</td><td><b>{{ a.person }}</b>{% if a.narstaende %} <span class="muted small">(närstående)</span>{% endif %}</td>
-<td class="small">{{ a.befattning }}</td>
+<td class="small">{{ a.transaktionsdatum|datum }}</td><td>{{ a.person }}</td>
 <td><span class="badge {{ 'behall' if a.kop else 'salj' }}">{{ 'KÖP' if a.kop else 'SÄLJ' }}</span></td>
-<td class="num">{{ a.volym|tal(0) }}</td><td class="num">{{ a.pris|tal }} <span class="muted small">{{ a.valuta }}</span></td>
-<td class="num">{{ a.belopp|kr }}</td></tr>{% endfor %}</tbody></table></div>
+<td class="num">{{ a.volym|tal(0) }}</td>
+<td class="num">{{ a.pris|tal }} <span class="muted small" {% if a.valuta_tolkad != (a.valuta or 'SEK') %}title="Anmält i {{ a.valuta }}, men priset stämmer med kursen i kronor"{% endif %}>{{ a.valuta_tolkad }}{% if a.valuta_tolkad != (a.valuta or 'SEK') %}*{% endif %}</span></td>
+<td class="num">{{ a.belopp_sek|kr }}</td></tr>{% endfor %}</tbody></table></div>
+<p class="small muted">* Anmält i annan valuta, men priset stämmer med aktiens kurs i kronor – räknas som kronor.</p></details>
 {% else %}<p class="small muted">Inga köp eller försäljningar av insiders senaste året.</p>{% endif %}
-<p class="small muted">Källa: Finansinspektionens insyns- och blankningsregister (offentliga). Insiders får inte handla
-30 dagar före en rapport. Affärer i aktieprogram räknas inte. <b>Information</b> – påverkar inte poängen eller reglerna.</p>
+<p class="small muted">Källa: Finansinspektionens insyns- och blankningsregister (offentliga). Belopp i kronor. Insiders får inte handla
+30 dagar före en rapport. Affärer i aktieprogram räknas inte. Stora belopp från en enda person är ofta en storägare
+(t.ex. ett investmentbolag med plats i styrelsen) – titta på antal köpare och andel av börsvärdet.
+<b>Information</b> – påverkar inte poängen eller reglerna.</p>
 {% endif %}</div>
 """
 
@@ -2038,26 +2054,24 @@ def insyn_kort(ticker: str) -> str:
         import signaler as sg
         d = sg.for_bolag(ticker, UTMAPP, sc.MAPP / "tickers_se.csv")
         aff = d["affarer"]
-        rader, nittio = [], pd.Timestamp(dt.date.today() - dt.timedelta(days=90))
-        kop_n = salj_n = 0
-        netto = 0.0
-        for a in aff.to_dict("records") if len(aff) else []:
-            a["kop"] = str(a["karaktar"]).lower() in ("förvärv", "acquisition")
-            rader.append(a)
-            if a["transaktionsdatum"] >= nittio and pd.notna(a["belopp"]):
-                netto += a["belopp"] if a["kop"] else -a["belopp"]
-        senaste = [a for a in rader if a["transaktionsdatum"] >= nittio]
-        kop_n = len({a["person"] for a in senaste if a["kop"]})
-        salj_n = len({a["person"] for a in senaste if not a["kop"]})
+        nittio = pd.Timestamp(dt.date.today() - dt.timedelta(days=90))
+        senaste = aff[aff["transaktionsdatum"] >= nittio] if len(aff) else aff
+        netto = float((senaste["belopp_sek"] * np.where(senaste["kop"], 1, -1)).sum()) if len(senaste) else None
+        kopare = senaste.loc[senaste["kop"], "person"].nunique() if len(senaste) else 0
+        saljare = senaste.loc[~senaste["kop"], "person"].nunique() if len(senaste) else 0
+        bv = d.get("borsvarde")
+        netto_pct = f"{netto / bv * 100:+.2f} %".replace(".", ",") if netto is not None and bv else None
         bl = d["blankning"] or {}
         pct = bl.get("blankning_pct")
         andr = bl.get("blankning_andring_30d")
         bl_txt = f"{pct:.2f} %".replace(".", ",") if pct else "under 0,1 %"
         bl_under = (f"{andr:+.2f} pe senaste 30 dagarna".replace(".", ",") if andr is not None and pd.notna(andr)
                     else "förändring visas när 30 dagars historik finns")
-        return render_template_string(INSYN_MALL, d=d, affarer=rader[:15], netto=netto if senaste else None,
-                                      netto_txt=(f"{netto / 1e6:+.2f} MSEK".replace(".", ",") if senaste else "inga affärer"),
-                                      kopare=kop_n, saljare=salj_n, bl_txt=bl_txt, bl_under=bl_under)
+        return render_template_string(
+            INSYN_MALL, d=d, affarer=aff.head(200).to_dict("records") if len(aff) else [],
+            personer=d["per_person"].to_dict("records") if len(d["per_person"]) else [],
+            netto=netto, netto_txt=(f"{netto / 1e6:+,.2f} MSEK".replace(",", " ").replace(".", ",") if netto is not None else "inga affärer"),
+            netto_pct=netto_pct, kopare=kopare, saljare=saljare, bl_txt=bl_txt, bl_under=bl_under)
     except Exception:
         import traceback
         app.logger.error("Insynsrutan för %s misslyckades:\n%s", ticker, traceback.format_exc())

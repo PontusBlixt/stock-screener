@@ -40,7 +40,7 @@ import screener as sc
 
 INSIDER_DAGAR = 90
 KOLUMNER = ["insider_kop_sek", "insider_salj_sek", "insider_netto_sek", "insider_kopare",
-            "insider_senaste_kop", "blankning_pct", "blankning_andring_30d"]
+            "insider_senaste_kop", "insider_saljare", "insider_netto_pct", "blankning_pct", "blankning_andring_30d"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +180,92 @@ def lei_karta(utmapp: Path, tickerfil: Path, blankning: pd.DataFrame | None = No
 
 
 # ---------------------------------------------------------------------------
+# Belopp i kronor
+# ---------------------------------------------------------------------------
+# Reserv om växelkursen inte går att hämta (ungefärliga, uppdateras sällan)
+FX_RESERV = {"SEK": 1.0, "EUR": 11.0, "USD": 9.6, "DKK": 1.47, "NOK": 0.93, "GBP": 12.7, "CHF": 11.9, "ISK": 0.077,
+             "PLN": 2.6, "CAD": 7.0}
+
+
+def valutakurser(utmapp: Path, valutor: set[str]) -> dict[str, float]:
+    """Växelkurs till SEK per valuta. kurser.csv först, sedan valutor.csv (hämtas från Yahoo högst en gång
+    i veckan), sist ungefärliga reservkurser."""
+    valutor = {v for v in valutor if v and v != "SEK"}
+    ut = {"SEK": 1.0, "": 1.0}
+    if not valutor:
+        return ut
+    import innehav as ih
+    k = ih.las_kurser(Path(utmapp) / "kurser.csv")
+    for v in list(valutor):
+        c = f"{v}SEK=X"
+        if c in k.columns and k[c].notna().any():
+            ut[v] = float(k[c].dropna().iloc[-1])
+            valutor.discard(v)
+    fil = Path(utmapp) / "valutor.csv"
+    sparade = pd.read_csv(fil).set_index("valuta")["kurs"].to_dict() if fil.exists() else {}
+    gammal = not fil.exists() or (dt.date.today() - dt.date.fromtimestamp(fil.stat().st_mtime)).days >= 7
+    saknas = [v for v in valutor if v not in sparade]
+    if gammal or saknas:
+        try:
+            data = sc.hamta_kurser([f"{v}SEK=X" for v in set(valutor) | set(sparade)], "5d")
+            for t, d in data.items():
+                if len(d["Close"].dropna()):
+                    sparade[t.removesuffix("SEK=X")] = float(d["Close"].dropna().iloc[-1])
+            pd.DataFrame({"valuta": list(sparade), "kurs": list(sparade.values())}).to_csv(fil, index=False)
+        except Exception:
+            pass
+    for v in valutor:
+        ut[v] = sparade.get(v, FX_RESERV.get(v, np.nan))
+    return ut
+
+
+def till_kronor(df: pd.DataFrame, utmapp: Path, tickerfil: Path) -> pd.DataFrame:
+    """Lägger till bolag, ticker och belopp_sek. Utländsk valuta räknas om till kronor. Är priset närmare
+    aktiens stängningskurs i kronor än i den angivna valutan, tolkas det som kronor (FI-anmälningar har
+    ibland fel valuta angiven, t.ex. DKK för en aktie som handlas i SEK)."""
+    import innehav as ih
+    df = df.copy()
+    lista = tickerlista(tickerfil)
+    isin_ticker = dict(zip(lista["isin"], lista["ticker"]))
+    isin_ticker.pop("", None)
+    df["ticker"] = df["isin"].map(isin_ticker)
+    df["bolag"] = df["ticker"].map(lambda t: sc.bolagsnyckel(t) if isinstance(t, str) else None)
+    if df["bolag"].isna().any():  # ISIN saknas i listan: via LEI-kartan
+        karta = lei_karta(utmapp, tickerfil)
+        df["bolag"] = df["bolag"].fillna(df["lei"].map(dict(zip(karta["lei"], karta["bolag"]))))
+    fx = valutakurser(utmapp, set(df["valuta"]))
+    df["fx"] = df["valuta"].map(lambda v: fx.get(v, np.nan))
+    df["valuta_tolkad"] = df["valuta"].replace("", "SEK")
+    utl = (df["valuta"] != "SEK") & (df["valuta"] != "") & df["ticker"].notna()
+    if utl.any():
+        k = ih.las_kurser(Path(utmapp) / "kurser.csv")
+        for i in df.index[utl]:
+            t = df.at[i, "ticker"]
+            if t not in k.columns:
+                continue
+            s = k[t].dropna()
+            stang = s.asof(df.at[i, "transaktionsdatum"]) if len(s) else np.nan
+            pris, f = df.at[i, "pris"], df.at[i, "fx"]
+            if pd.notna(stang) and stang > 0 and pd.notna(pris) and pris > 0 and pd.notna(f):
+                if abs(np.log(pris / stang)) < abs(np.log(pris * f / stang)):
+                    df.at[i, "fx"] = 1.0
+                    df.at[i, "valuta_tolkad"] = "SEK"
+    df["belopp_sek"] = df["belopp"] * df["fx"]
+    return df
+
+
+def borsvarden(utmapp: Path) -> dict[str, float]:
+    """Börsvärde i kronor per bolag ur senaste nyckeltalsfilen (största värdet om bolaget har flera aktieslag)."""
+    m = Path(utmapp) / "nyckeltal"
+    filer = sorted(m.glob("????-??-??.csv")) if m.exists() else []
+    if not filer:
+        return {}
+    d = pd.read_csv(filer[-1], usecols=["ticker", "borsvarde"])
+    d["bolag"] = d["ticker"].map(sc.bolagsnyckel)
+    return d.groupby("bolag")["borsvarde"].max().dropna().to_dict()
+
+
+# ---------------------------------------------------------------------------
 # Sammanfattningar per bolag
 # ---------------------------------------------------------------------------
 def insider_sammanfattning(utmapp: Path, tickerfil: Path, slut: dt.date | None = None,
@@ -187,30 +273,25 @@ def insider_sammanfattning(utmapp: Path, tickerfil: Path, slut: dt.date | None =
     slut = slut or dt.date.today()
     start = slut - dt.timedelta(days=dagar)
     df = las_insyn(utmapp, fran=start - dt.timedelta(days=31))
-    tom = pd.DataFrame(columns=["bolag"] + KOLUMNER[:5])
+    tom = pd.DataFrame(columns=["bolag"] + KOLUMNER[:7])
     if df.empty:
         return tom
     df = df[_ar_giltig(df) & (df["transaktionsdatum"] >= pd.Timestamp(start))
             & (df["transaktionsdatum"] <= pd.Timestamp(slut))].copy()
     if df.empty:
         return tom
-    lista = tickerlista(tickerfil)
-    isin_bolag = dict(zip(lista["isin"], lista["bolag"]))
-    isin_bolag.pop("", None)
-    df["bolag"] = df["isin"].map(isin_bolag)
-    # ISIN saknas i listan (t.ex. äldre tickers_se.csv utan isin): via LEI-kartan
-    if df["bolag"].isna().any():
-        karta = lei_karta(utmapp, tickerfil)
-        df["bolag"] = df["bolag"].fillna(df["lei"].map(dict(zip(karta["lei"], karta["bolag"]))))
-    df = df.dropna(subset=["bolag"])
+    df = till_kronor(df, utmapp, tickerfil).dropna(subset=["bolag"])
     kop = df["karaktar"].str.lower().isin(["förvärv", "acquisition"])
     ut = pd.DataFrame({
-        "insider_kop_sek": df[kop].groupby("bolag")["belopp"].sum(),
-        "insider_salj_sek": df[~kop].groupby("bolag")["belopp"].sum(),
+        "insider_kop_sek": df[kop].groupby("bolag")["belopp_sek"].sum(),
+        "insider_salj_sek": df[~kop].groupby("bolag")["belopp_sek"].sum(),
         "insider_kopare": df[kop].groupby("bolag")["person"].nunique(),
+        "insider_saljare": df[~kop].groupby("bolag")["person"].nunique(),
         "insider_senaste_kop": df[kop].groupby("bolag")["transaktionsdatum"].max(),
-    }).fillna({"insider_kop_sek": 0.0, "insider_salj_sek": 0.0, "insider_kopare": 0})
+    }).fillna({"insider_kop_sek": 0.0, "insider_salj_sek": 0.0, "insider_kopare": 0, "insider_saljare": 0})
     ut["insider_netto_sek"] = ut["insider_kop_sek"] - ut["insider_salj_sek"]
+    bv = borsvarden(utmapp)
+    ut["insider_netto_pct"] = [n / bv[b] if bv.get(b) else np.nan for b, n in zip(ut.index, ut["insider_netto_sek"])]
     return ut.reset_index().rename(columns={"index": "bolag"})
 
 
@@ -251,7 +332,7 @@ def berika(tabell: pd.DataFrame, utmapp: Path, tickerfil: Path, dag: dt.date | N
     ins = insider_sammanfattning(utmapp, tickerfil, dag)
     bl = blankning_sammanfattning(utmapp, tickerfil, dag)
     t = t.merge(ins, on="bolag", how="left").merge(bl, on="bolag", how="left")
-    for k in ("insider_kop_sek", "insider_salj_sek", "insider_netto_sek", "insider_kopare"):
+    for k in ("insider_kop_sek", "insider_salj_sek", "insider_netto_sek", "insider_kopare", "insider_saljare"):
         t[k] = t[k].fillna(0)
     t.index = tabell.index
     return t
@@ -261,20 +342,33 @@ def for_bolag(ticker: str, utmapp: Path, tickerfil: Path, dagar: int = 365) -> d
     """Detaljer för aktiesidan: insideraffärer senaste året och blankningens historik."""
     bolag = sc.bolagsnyckel(ticker)
     ut = {"affarer": pd.DataFrame(), "blankning": None, "blankning_hist": pd.DataFrame(), "har_data": False}
-    lista = tickerlista(tickerfil)
-    isin_bolag = dict(zip(lista["isin"], lista["bolag"]))
-    isin_bolag.pop("", None)
+    ut["per_person"] = pd.DataFrame()
+    ut["borsvarde"] = borsvarden(utmapp).get(bolag)
     df = las_insyn(utmapp, fran=dt.date.today() - dt.timedelta(days=dagar + 31))
     if len(df):
         ut["har_data"] = True
-        df = df[_ar_giltig(df)].copy()
-        df["bolag"] = df["isin"].map(isin_bolag)
-        if df["bolag"].isna().any():
-            karta = lei_karta(utmapp, tickerfil)
-            df["bolag"] = df["bolag"].fillna(df["lei"].map(dict(zip(karta["lei"], karta["bolag"]))))
-        df = df[(df["bolag"] == bolag)
-                & (df["transaktionsdatum"] >= pd.Timestamp(dt.date.today() - dt.timedelta(days=dagar)))]
-        ut["affarer"] = df.sort_values("transaktionsdatum", ascending=False)
+        df = df[_ar_giltig(df) & (df["transaktionsdatum"] >= pd.Timestamp(dt.date.today() - dt.timedelta(days=dagar)))]
+        lista = tickerlista(tickerfil)
+        isins = set(lista.loc[lista["bolag"] == bolag, "isin"]) - {""}
+        karta = lei_karta(utmapp, tickerfil)
+        leis = set(karta.loc[karta["bolag"] == bolag, "lei"])
+        df = df[df["isin"].isin(isins) | df["lei"].isin(leis)]  # snabbt förurval innan omräkningen
+        if len(df):
+            df = till_kronor(df, utmapp, tickerfil)
+            df = df[df["bolag"] == bolag].copy()
+            df["kop"] = df["karaktar"].str.lower().isin(["förvärv", "acquisition"])
+            ut["affarer"] = df.sort_values(["transaktionsdatum", "belopp_sek"], ascending=[False, False])
+            # En rad per person: köpt, sålt, antal affärer, senaste datum – störst belopp först
+            df["kop_sek"] = np.where(df["kop"], df["belopp_sek"], 0.0)
+            df["salj_sek"] = np.where(df["kop"], 0.0, df["belopp_sek"])
+            df["kop_antal"] = np.where(df["kop"], df["volym"], 0.0)
+            df["salj_antal"] = np.where(df["kop"], 0.0, df["volym"])
+            pp = df.groupby(["person", "befattning"], dropna=False).agg(
+                narstaende=("narstaende", "max"), kop_sek=("kop_sek", "sum"), salj_sek=("salj_sek", "sum"),
+                kop_antal=("kop_antal", "sum"), salj_antal=("salj_antal", "sum"), affarer=("kop", "size"),
+                forsta=("transaktionsdatum", "min"), senaste=("transaktionsdatum", "max")).reset_index()
+            pp["netto_sek"] = pp["kop_sek"] - pp["salj_sek"]
+            ut["per_person"] = pp.reindex(pp["netto_sek"].abs().sort_values(ascending=False).index)
     m = Path(utmapp) / "blankning"
     if (m / "senaste.csv").exists():
         ut["har_data"] = True

@@ -368,13 +368,19 @@ def _blankning_txt(pct, andring) -> str:
     return t
 
 
-def _insider_txt(netto, kopare) -> str:
-    """'+1,2 M (3)' – nettoköp i miljoner kronor senaste 90 dagarna och antal köpare."""
+def _insider_txt(netto, kopare, saljare=0, andel=None) -> str:
+    """'+0,15 % 3↑1↓' – nettoköp senaste 90 dagarna som andel av börsvärdet, antal köpare (↑) och säljare (↓).
+    Saknas börsvärdet visas miljoner kronor i stället."""
     if netto is None or pd.isna(netto) or abs(netto) < 1:
         return ""
-    t = f"{netto / 1e6:+.1f} M".replace(".", ",")
-    if kopare and pd.notna(kopare) and kopare > 0:
-        t += f" ({int(kopare)})"
+    if andel is not None and pd.notna(andel):
+        t = f"{andel * 100:+.2f} %".replace(".", ",")
+    else:
+        t = f"{netto / 1e6:+.1f} M".replace(".", ",")
+    k = int(kopare) if kopare and pd.notna(kopare) else 0
+    s_ = int(saljare) if saljare and pd.notna(saljare) else 0
+    if k or s_:
+        t += f" {k}↑{s_}↓"
     return t
 
 
@@ -409,7 +415,7 @@ def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute
              tabell_md(topp, KOLUMNER + info_kolumner(topp))]
     if info_kolumner(topp):
         delar += ["", "Blankning = total blankning (FI), ↑↓ förändring senaste 30 dagarna. Insider 90 d = nettoköp av "
-                      "personer i ledande ställning i miljoner kronor (antal köpare). Information – påverkar inte poängen."]
+                      "personer i ledande ställning som andel av börsvärdet, antal köpare ↑ och säljare ↓. Information – påverkar inte poängen."]
 
     ej_urval = topp[~topp["urval"]]
     if len(ej_urval):
@@ -469,7 +475,7 @@ def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, br
             f'<td class="num">{r.omsattning_sek / 1e6:.0f}</td>'
             + (f'<td class="num" title="Total blankning enligt FI, förändring senaste 30 dagarna">{e(r.txt_blankning)}</td>'
                f'<td class="num {"pos" if (r.insider_netto_sek or 0) > 0 else "neg" if (r.insider_netto_sek or 0) < 0 else ""}"'
-               f' title="Nettoköp av insiders senaste 90 dagarna (antal köpare)">{e(r.txt_insider)}</td>' if har_info else "")
+               f' title="Nettoköp av insiders senaste 90 dagarna som andel av börsvärdet, köpare ↑ och säljare ↓">{e(r.txt_insider)}</td>' if har_info else "")
             + '</tr>'
         )
 
@@ -564,7 +570,7 @@ footer {{ margin-top:24px; font-size:12px; color:var(--muted) }}
 <p class="muted small">Grön rad = klarar urvalsreglerna: 1 mån ≤ {KONFIG['urval_max_1m'] * 100:.0f} %,
 omsättning ≥ {KONFIG['urval_min_omsattning_sek'] / 1e6:.0f} MSEK/dag,
 volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %. Håll muspekaren över en rad för orsaken.
-{"<br>Blankning = total blankning enligt FI (↑↓ förändring senaste 30 dagarna). Insider 90 d = nettoköp av personer i ledande ställning i miljoner kronor (antal köpare). Bara information – påverkar inte poängen." if har_info else ""}</p>
+{"<br>Blankning = total blankning enligt FI (↑↓ förändring senaste 30 dagarna). Insider 90 d = nettoköp av personer i ledande ställning som andel av börsvärdet, antal köpare ↑ och säljare ↓. Bara information – påverkar inte poängen." if har_info else ""}</p>
 {ej_urval_html}
 <div class="grid">{''.join(kort)}</div>
 <footer>Kandidater att granska vidare, inte köprekommendationer. Data: Yahoo Finance.</footer>
@@ -580,7 +586,10 @@ def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader
     topp = tabell[tabell["topp"]].copy()
     if "blankning_pct" in topp.columns:
         topp["txt_blankning"] = [_blankning_txt(p, a) for p, a in zip(topp["blankning_pct"], topp["blankning_andring_30d"])]
-        topp["txt_insider"] = [_insider_txt(n, k) for n, k in zip(topp["insider_netto_sek"], topp["insider_kopare"])]
+        topp["txt_insider"] = [_insider_txt(n, k, sa, an) for n, k, sa, an in zip(
+            topp["insider_netto_sek"], topp["insider_kopare"],
+            topp.get("insider_saljare", pd.Series(0, index=topp.index)),
+            topp.get("insider_netto_pct", pd.Series(np.nan, index=topp.index)))]
 
     forra = forra_topplistan(utmapp, idag)
     nya = ute = None
