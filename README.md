@@ -74,6 +74,9 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `kurser.csv` | Stängningskurser för grafer och utveckling | Ja – återskapas vid nästa körning |
 | `backup/` | Säkerhetskopior från Avanza-importen. Bara de 10 senaste per fil behålls, äldre raderas automatiskt | Ja |
 | `strategier/<strategi>/` | Strategiernas låtsasportföljer: innehav, affärslogg och tillstånd | Nej – raderas den börjar strategin om från noll |
+| `insyn/ÅÅÅÅ-MM.csv` | Insynsaffärer från FI:s insynsregister, en fil per månad – från `insamling.py` | **Aldrig** (historiken går att hämta om, men inte om FI tar bort den) |
+| `blankning/` | FI:s Excelfiler med blankningspositioner, en per dag – går inte att återskapa | **Aldrig** |
+| `rapporter/` | Rapportdatum, förväntad och verklig vinst per aktie från Yahoo | **Aldrig** |
 | `backtest/` | Resultat från `backtest.py` (en mapp per period) och 5 års kurser i `backtest/data/` | Ja – skapas om vid nästa backtest |
 | `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
@@ -262,6 +265,8 @@ Det enda sättet att veta om en strategi fungerar är att se den gå framåt i t
 | Topp 10 | 10 innehav (plats 1–10), dubbel vikt, säljs utanför topp 20 | Ger färre och starkare aktier mer? |
 | Utan urvalsregler | Köper plats 1–20 även utan grön rad | Hjälper urvalsreglerna (uttänjd, likviditet, volatilitet)? |
 | Daglig stopp | SÄLJ-reglerna (stopp, MA200, MA50) kollas varje vardag. Köp, månadsgenomgång och trimning sker fortfarande bara på lördagar | Räddar en snabbare stopp pengar, eller säljer den bara i onödan? |
+| Månadsvis | Säljer, köper och trimmar bara första lördagen i varje ny månad. Däremellan rörs ingenting – inte heller vid stopp | Säljer veckobeslutet bort avkastning genom för många affärer? |
+| Kvartalsvis | Som Månadsvis, men bara första lördagen i januari, april, juli och oktober | Ännu färre affärer – hur långsamt kan man vara? |
 | Slumpportfölj | Köper slumpvisa aktier bland de godkända (som klarar trendfiltren). Ingen rankningsregel vid sälj – annars samma säljregler | Hur mycket ger ren tur? Måttstocken för alla andra |
 
 B, C och Momentum + kvalitet behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie poäng tas den inte bort i B och räknas som medel (50) i C och Momentum + kvalitet. Slumpportföljens lottning bestäms av strategi och datum, så en omkörning ger samma lottning.
@@ -278,7 +283,7 @@ cd ~/screener && ./venv/bin/python strategier.py
 
 En strategi börjar på den rapport som finns när den startas – historiken spelas inte upp i efterhand, eftersom det vore ett backtest och inte ett framåttest. Om veckokörningen missas en lördag kör boten ikapp de rapporter den missat nästa gång, i datumordning.
 
-**Lägga till en strategi senare:** lägg till den i `STRATEGIER` i `strategier.py`. Enkla varianter (antal innehav, köpgräns, säljgräns, stopp, urvalsregler, daglig kontroll) görs bara med inställningarna i `STANDARD`. En ny rangordning behöver också en rad i `rangordna()`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
+**Lägga till en strategi senare:** lägg till den i `STRATEGIER` i `strategier.py`. Enkla varianter (antal innehav, köpgräns, säljgräns, stopp, urvalsregler, daglig kontroll, rytm) görs bara med inställningarna i `STANDARD`. En ny rangordning behöver också en rad i `rangordna()`. Den startar vid nästa körning och syns automatiskt i fliken. Ändra aldrig en strategi som redan körs – lägg i stället till en ny version (t.ex. "Momentum v2"), annars blandas två strategier i samma resultat.
 
 ## Backtest: hur hade det gått tidigare?
 
@@ -293,7 +298,7 @@ cd ~/screener
 
 Första körningen per dag hämtar 5 års kurser och omsättning för alla aktier (några minuter). Resten av dagen återanvänds de. Resultatet visas på webbsidan under **Strategier → Backtest**, med en flik per period du kört, och skrivs också ut i terminalen. Körs samma period igen skrivs den över.
 
-**Bara prisbaserade strategier kan testas bakåt:** Momentum v1, Topp 10, Utan urvalsregler, Daglig stopp och Slumpportfölj. B, C och Momentum + kvalitet behöver nyckeltalen som de såg ut då, och de sparas först sedan oktober 2026. Med dagens nyckeltal skulle testet veta saker som ingen visste då.
+**Bara prisbaserade strategier kan testas bakåt:** Momentum v1, Topp 10, Utan urvalsregler, Daglig stopp, Månadsvis, Kvartalsvis och Slumpportfölj. B, C och Momentum + kvalitet behöver nyckeltalen som de såg ut då, och de sparas först sedan oktober 2026. Med dagens nyckeltal skulle testet veta saker som ingen visste då.
 
 **Läs resultatet med försiktighet:**
 
@@ -301,6 +306,27 @@ Första körningen per dag hämtar 5 års kurser och omsättning för alla aktie
 - **En period är ett utfall.** Kör flera längder. En strategi som slår slumpportföljen i alla perioder är mer trovärdig än en som vinner stort i en.
 - **Största nedgång** visar hur ont det hade gjort på vägen – viktigt för om du hade orkat följa strategin.
 - **Ändra inte strategierna efter backtestet** och kör om tills det ser bra ut. Då anpassar du strategin efter historiken, och den slutar fungera framåt. Backtestet är ett komplement – framåttestet i fliken Strategier är det som avgör.
+
+## Insamling: insynsaffärer, blankning och rapportdatum
+
+`insamling.py` samlar in tre källor som ska analyseras senare (rapporteffekter, insiderköp, blankning). Inget av det påverkar rapporten, säljreglerna eller strategierna ännu.
+
+| Källa | Vad | Hur ofta |
+|---|---|---|
+| Insynsregistret (Finansinspektionen) | Alla köp och försäljningar av personer i ledande ställning: vem, befattning, köp/sälj, antal, pris, datum | Historik sedan juli 2016 med `--historik`, sedan de två senaste månaderna varje dag |
+| Blankningsregistret (Finansinspektionen) | Korta positioner över 0,5 % per blankare, och aggregerade positioner över 0,1 % | Aktuella och aggregerade varje dag, historiska varje måndag |
+| Yahoo | Rapportdatum, analytikernas förväntade vinst per aktie, verklig vinst och överraskning i procent | En gång i veckan |
+
+**Blankningen är den viktigaste att samla:** FI:s aktuella fil skrivs över varje dag, så en dag som inte sparas är borta. Insynsregistret har historik och kan hämtas om.
+
+```bash
+cd ~/screener
+./venv/bin/pip install openpyxl           # för att kunna läsa FI:s Excelfiler senare
+./venv/bin/python insamling.py --historik # första gången: insyn sedan 2016 (~120 månader, ca 5 min) och 10 års rapporthistorik
+./venv/bin/python insamling.py            # det cron kör varje vardag
+```
+
+Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andra. Hittar skriptet inte Excellänkarna på FI:s sida står det i utskriften – då har FI ändrat sidan och länksökningen i `blankningslankar()` behöver justeras.
 
 ## Köra automatiskt varje vecka
 
@@ -310,11 +336,14 @@ Första körningen per dag hämtar 5 års kurser och omsättning för alla aktie
 0 8 * * 6 cd ~/screener && ./venv/bin/python screener.py >> /srv/storage/screener/logg.txt 2>&1
 30 18 * * 1-5 cd ~/screener && ./venv/bin/python nyckeltal.py >> /srv/storage/screener/nyckeltal_logg.txt 2>&1
 45 18 * * 1-5 cd ~/screener && ./venv/bin/python strategier.py --dagligt >> /srv/storage/screener/strategier_logg.txt 2>&1
+15 19 * * 1-5 cd ~/screener && ./venv/bin/python insamling.py >> /srv/storage/screener/insamling_logg.txt 2>&1
 ```
 
 Den andra raden sparar nyckeltalen varje vardag kl. 18:30, en timme efter Stockholmsbörsens stängning.
 
 Den tredje raden är den dagliga kontrollen för strategin *Daglig stopp*. Den hämtar dagens kurser för strategins innehav (bara ett tjugotal aktier, några sekunder) och säljer det som bryter stoppen eller trendreglerna.
+
+Den fjärde raden är insamlingen av insynsaffärer, blankning och rapportdatum (se *Insamling*).
 
 ## Anpassa
 

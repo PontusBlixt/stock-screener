@@ -29,6 +29,8 @@ Strategier (bestämda i förväg, se STRATEGIER nedan och README):
   utan_urval    topp 20 utan urvalsreglerna
   daglig_stopp  som Momentum v1, men SÄLJ-reglerna kollas varje vardag (strategier.py --dagligt)
   slump         20 slumpvisa bland godkända – visar hur mycket som är tur
+  manad         som Momentum v1, men agerar bara första lördagen i varje månad
+  kvartal       som Momentum v1, men agerar bara första lördagen i varje kvartal
 
 Filer: <utmapp>/strategier/<id>/
   innehav.csv     nuvarande innehav (samma format som din innehav.csv)
@@ -81,6 +83,8 @@ STANDARD = {
     "stopp": 0.20,           # släpande stopp
     "ordning": "plats",      # "plats" = i rankningsordning, "slump" = slumpvis bland godkända
     "dagligt": False,        # SÄLJ-reglerna (stopp, MA200, MA50) kollas varje vardag, inte bara lördag
+    "rytm": "vecka",         # hur ofta boten agerar: "vecka", "manad" (första lördagen i ny månad)
+                             # eller "kvartal" (första lördagen i januari, april, juli, oktober)
 }
 STRATEGIER = {
     "momentum_v1": {"namn": "Momentum v1", "kort": "Veckorapporten som den är"},
@@ -98,7 +102,16 @@ STRATEGIER = {
                      "dagligt": True},
     "slump": {"namn": "Slumpportfölj", "kort": "20 slumpvisa bland godkända, samma säljregler – måttstock för tur",
               "ordning": "slump", "krav_urval": False, "salj_rank": None},
+    "manad": {"namn": "Månadsvis", "kort": "Som Momentum v1, men säljer, köper och trimmar bara en gång i månaden",
+              "rytm": "manad"},
+    "kvartal": {"namn": "Kvartalsvis", "kort": "Som Momentum v1, men säljer, köper och trimmar bara en gång per kvartal",
+                "rytm": "kvartal"},
 }
+
+
+def _kvartal(datum: str) -> str:
+    """'2026-10-17' -> '2026-Q4'"""
+    return f"{datum[:4]}-Q{(int(datum[5:7]) - 1) // 3 + 1}"
 
 
 def inst(sid: str) -> dict:
@@ -280,10 +293,18 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | No
         return f"{sid}: väntar – inga nyckeltal från de senaste {NYCKELTAL_MAX_ALDER} dagarna"
     if t is None:
         t = {"startkapital": STARTKAPITAL, "kassa": STARTKAPITAL, "start": rapport, "senaste_rapport": "",
-             "senaste_manad": rapport[:7], "namn": STRATEGIER[sid]["namn"]}
+             "senaste_manad": rapport[:7], "senaste_kvartal": _kvartal(rapport), "namn": STRATEGIER[sid]["namn"]}
         manadsgenomgang = False  # inga innehav att granska första gången
+        agera = True             # första gången köper alla strategier direkt
     else:
         manadsgenomgang = rapport[:7] != t["senaste_manad"] and not dagligt
+        if S["rytm"] == "manad":
+            agera = manadsgenomgang
+        elif S["rytm"] == "kvartal":
+            agera = _kvartal(rapport) != t.get("senaste_kvartal", _kvartal(t["start"])) and not dagligt
+            manadsgenomgang = agera
+        else:
+            agera = True
 
     k = kurser[kurser.index <= pd.Timestamp(rdatum)]
     inn = ih.las_innehav(m / "innehav.csv")
@@ -297,6 +318,11 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | No
         skriv_tillstand(m, t)
         return f"{sid}: inga nya kurser sedan {t['senaste_handelsdag']}"
     t.setdefault("start_handelsdag", str(handelsdag.date()))
+    if not agera:  # månads- eller kvartalsstrategi mellan genomgångarna: rör ingenting
+        t.update(senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_kvartal=_kvartal(rapport),
+                 senaste_handelsdag=str(handelsdag.date()))
+        skriv_tillstand(m, t)
+        return f"{sid}: ingen genomgång denna vecka ({'månadsvis' if S['rytm'] == 'manad' else 'kvartalsvis'})"
     rank = None if dagligt else rangordna(sid, tabell, nyckeltal)
     avsl = ih.las_affarer(m / "avslutade.csv")
     logg = las_logg(m)
@@ -405,11 +431,12 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | No
     if nya_rader:
         inn = pd.concat([inn, pd.DataFrame(nya_rader)], ignore_index=True)
 
-    upd = dict(senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_handelsdag=str(handelsdag.date()))
+    upd = dict(senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_kvartal=_kvartal(rapport),
+               senaste_handelsdag=str(handelsdag.date()))
     if nyckeltal is not None and S["nyckeltal"]:
         upd["senaste_nyckeltal"] = nyckeltal.attrs.get("fil", "")
     return _spara(sid, m, t, inn, avsl, alla_logg(), nya_avsl, nya_logg, kassa, handelsdag, upd,
-                  "månadsgenomgång" if manadsgenomgang else "")
+                  ("kvartalsgenomgång" if S["rytm"] == "kvartal" else "månadsgenomgång") if manadsgenomgang else "")
 
 
 def _spara(sid, m, t, inn, avsl, logg, nya_avsl, nya_logg, kassa, handelsdag, upd: dict, extra: str) -> str:

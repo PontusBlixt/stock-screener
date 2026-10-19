@@ -520,6 +520,22 @@ def status_rader() -> list[dict]:
         ok = (dt.date.today() - senast).days <= 9
         rader.append({"namn": "Kurser", "datum": senast, "ok": ok,
                       "text": "" if ok else "gamla kurser – kör screenern eller Uppdatera kurser"})
+    # insamling.py: insyn och blankning varje vardag, rapportdatum varje vecka (visas när mappen finns)
+    for mapp_namn, namn, max_dagar, logg in (("insyn", "Insynsaffärer", 4, "insamling_logg.txt"),
+                                             ("blankning", "Blankning", 4, "insamling_logg.txt"),
+                                             ("rapporter", "Rapportdatum", 9, "insamling_logg.txt")):
+        mp = UTMAPP / mapp_namn
+        if not mp.exists():
+            continue
+        filer = [f for f in mp.iterdir() if f.is_file() and not f.name.endswith(".tmp")]
+        if not filer:
+            rader.append({"namn": namn, "datum": None, "ok": False, "text": "inga filer än – kör insamling.py"})
+            continue
+        senast = dt.date.fromtimestamp(max(f.stat().st_mtime for f in filer))
+        ok = (dt.date.today() - senast).days <= max_dagar
+        rader.append({"namn": namn, "datum": senast, "ok": ok,
+                      "text": f"{len(filer)} filer" if ok else f"inget nytt sedan {senast} – kontrollera cron och {logg}"})
+
     # Strategierna: beslutas vid veckokörningen, daglig stopp varje vardag
     try:
         tillst = {sid: st.las_tillstand(st.mapp(UTMAPP, sid)) for sid in st.STRATEGIER}
@@ -569,6 +585,7 @@ STATUS_MALL = """
 tail -30 {{ utmapp }}/nyckeltal_logg.txt
 tail -30 {{ utmapp }}/logg.txt
 tail -30 {{ utmapp }}/strategier_logg.txt
+tail -30 {{ utmapp }}/insamling_logg.txt
 timedatectl | grep "Time zone"</pre></div>
 """
 
@@ -1075,7 +1092,7 @@ def ta_bort_affar(idx: int):
 # Strategier – virtuella portföljer (pappershandel), se strategier.py
 # ---------------------------------------------------------------------------
 STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "kvalitet": "#8a63d2",
-              "topp10": "#c9a227", "utan_urval": "#3fa7c9", "daglig_stopp": "#d4566a", "slump": "#9aa0a6",
+              "topp10": "#c9a227", "utan_urval": "#3fa7c9", "daglig_stopp": "#d4566a", "slump": "#9aa0a6", "manad": "#a1887f", "kvartal": "#00a88f",
               "egen": "#b0489c"}
 
 
