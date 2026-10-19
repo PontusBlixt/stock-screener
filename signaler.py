@@ -216,6 +216,15 @@ def valutakurser(utmapp: Path, valutor: set[str]) -> dict[str, float]:
             pass
     for v in valutor:
         ut[v] = sparade.get(v, FX_RESERV.get(v, np.nan))
+    # Valutor som Yahoo inte har (t.ex. SCR, BWP) sparas som saknade så de inte hämtas varje körning
+    nya_saknade = [v for v in saknas if v not in sparade]
+    if nya_saknade:
+        for v in nya_saknade:
+            sparade[v] = FX_RESERV.get(v, np.nan)
+        try:
+            pd.DataFrame({"valuta": list(sparade), "kurs": list(sparade.values())}).to_csv(fil, index=False)
+        except OSError:
+            pass
     return ut
 
 
@@ -381,3 +390,139 @@ def for_bolag(ticker: str, utmapp: Path, tickerfil: Path, dagar: int = 365) -> d
             leis = set(karta.loc[karta["bolag"] == bolag, "lei"])
             ut["blankning_hist"] = logg[logg["lei"].isin(leis)].sort_values("hamtad")
     return ut
+
+
+# ---------------------------------------------------------------------------
+# Köpsignal för strategierna Insider 30 / Insider 60
+# ---------------------------------------------------------------------------
+# Från insideranalys.py (2026-10-19): köpvågor 31–60 dagar före nästa rapport slog marknaden efter kostnad
+# 8 av 9 år, och nästa rapports kursreaktion var +1,2 % (t 4,1). Reglerna nedan är bestämda före backtestet.
+INSIDER_RAPPORT_FONSTER = (31, 60)   # dagar från beslutsdagen (lördag) till nästa rapport
+INSIDER_SPARR_VECKOR = 4             # ny köpvåg = inga nettoköp de 4 veckorna innan
+
+
+def insider_affarer(utmapp: Path, tickerfil: Path) -> pd.DataFrame:
+    """Alla giltiga köp och sälj i kronor, sorterade på publiceringsdag. Tom tabell om data saknas."""
+    df = las_insyn(utmapp)
+    if df.empty:
+        return pd.DataFrame(columns=["publicerad", "bolag", "person", "kop", "belopp_sek"])
+    df = df[_ar_giltig(df)].dropna(subset=["publicerad"])
+    df = till_kronor(df, utmapp, tickerfil).dropna(subset=["bolag", "belopp_sek"])
+    df["kop"] = df["karaktar"].str.lower().isin(["förvärv", "acquisition"])
+    return df[["publicerad", "bolag", "person", "kop", "belopp_sek"]].sort_values("publicerad").reset_index(drop=True)
+
+
+def rapportkalender(utmapp: Path) -> dict[str, np.ndarray]:
+    """bolag -> sorterade rapportdatum (även kommande) ur rapporter/historik.csv."""
+    import rapportanalys as ra
+    fil = Path(utmapp) / "rapporter" / "historik.csv"
+    if not fil.exists():
+        return {}
+    r = pd.read_csv(fil)
+    r["rapportdatum"] = pd.to_datetime(r["rapportdatum"], errors="coerce").dt.normalize()
+    r = r.dropna(subset=["rapportdatum"])
+    r["eps_utfall"] = pd.to_numeric(r.get("eps_utfall"), errors="coerce")
+    r = r.drop_duplicates(["ticker", "rapportdatum"]).sort_values(["ticker", "rapportdatum"]).reset_index(drop=True)
+    r = ra.slå_ihop_nara(r)
+    r["bolag"] = r["ticker"].map(sc.bolagsnyckel)
+    return {b: np.unique(g["rapportdatum"].to_numpy(dtype="datetime64[D]")) for b, g in r.groupby("bolag")}
+
+
+def nasta_rapport(kalender: dict, bolag: str, efter) -> pd.Timestamp | None:
+    """Första rapportdatum strikt efter dagen 'efter'."""
+    rd = kalender.get(bolag)
+    if rd is None or not len(rd):
+        return None
+    d = np.datetime64(pd.Timestamp(efter).date(), "D")
+    i = np.searchsorted(rd, d, side="right")
+    return pd.Timestamp(rd[i]) if i < len(rd) else None
+
+
+def insider_kandidater(aff: pd.DataFrame, kalender: dict, dag, likvida: pd.DataFrame,
+                       borsvarde: dict | None = None, kurser: pd.DataFrame | None = None,
+                       fonster: tuple[int, int] = INSIDER_RAPPORT_FONSTER) -> pd.DataFrame:
+    """Köpkandidater beslutsdagen 'dag' (lördag).
+      - insiders har köpt netto i bolaget, publicerat fredag–torsdag före beslutsdagen (fredagens publiceringar
+        räknas nästa vecka, så att inget köps på en kurs från innan affären blev känd)
+      - nettoköp även över 4 veckor, och inga nettoköp de 4 veckorna innan (första veckan i en köpvåg)
+      - nästa rapport om 31–60 dagar
+      - likvid: finns i 'likvida' (ticker, bolag – redan filtrerad på omsättning)
+    Sorteras på nettoköp i procent av börsvärdet (störst först)."""
+    D = pd.Timestamp(dag).normalize()
+    slut, start = D - pd.Timedelta(days=2), D - pd.Timedelta(days=8)
+    tom = pd.DataFrame(columns=["ticker", "bolag", "netto_sek", "kopare", "nasta_rapport", "dagar_till_rapport", "andel"])
+    if aff is None or aff.empty or likvida is None or likvida.empty:
+        return tom
+    p = aff["publicerad"].to_numpy()
+    lo = np.searchsorted(p, np.datetime64(start - pd.Timedelta(weeks=INSIDER_SPARR_VECKOR)), side="left")
+    hi = np.searchsorted(p, np.datetime64(slut + pd.Timedelta(days=1)), side="left")
+    a = aff.iloc[lo:hi]
+    if a.empty:
+        return tom
+    a = a.assign(netto=np.where(a["kop"], a["belopp_sek"], -a["belopp_sek"]))
+
+    def netto(fran, till):
+        x = a[(a["publicerad"] >= fran) & (a["publicerad"] <= till)]
+        return x.groupby("bolag")["netto"].sum()
+
+    vecka = netto(start, slut)
+    fyra = netto(slut - pd.Timedelta(days=27), slut)
+    kandid = set(vecka[vecka > 0].index) & set(fyra[fyra > 0].index)
+    for k in range(1, INSIDER_SPARR_VECKOR + 1):
+        tidigare = netto(start - pd.Timedelta(weeks=k), slut - pd.Timedelta(weeks=k))
+        kandid -= set(tidigare[tidigare > 0].index)
+    if not kandid:
+        return tom
+    lik = likvida.drop_duplicates("bolag").set_index("bolag")["ticker"]
+    f4 = a[(a["publicerad"] >= slut - pd.Timedelta(days=27)) & (a["publicerad"] <= slut) & a["kop"]]
+    kopare = f4.groupby("bolag")["person"].nunique()
+    rader = []
+    for b in kandid:
+        if b not in lik.index:
+            continue
+        r = nasta_rapport(kalender, b, D)
+        if r is None:
+            continue
+        dagar = (r - D).days
+        if not fonster[0] <= dagar <= fonster[1]:
+            continue
+        t = lik[b]
+        andel = np.nan
+        if borsvarde and b in borsvarde and kurser is not None and t in kurser.columns:
+            s = kurser[t].dropna()
+            fore = s[s.index <= D]
+            if len(s) and len(fore) and s.iloc[-1] > 0:
+                bv = borsvarde[b] * fore.iloc[-1] / s.iloc[-1]   # börsvärdet då ≈ dagens × kursutvecklingen
+                andel = fyra[b] / bv if bv > 0 else np.nan
+        rader.append({"ticker": t, "bolag": b, "netto_sek": float(fyra[b]), "kopare": int(kopare.get(b, 0)),
+                      "nasta_rapport": r, "dagar_till_rapport": dagar, "andel": andel})
+    if not rader:
+        return tom
+    return (pd.DataFrame(rader).sort_values(["andel", "netto_sek"], ascending=False, na_position="last")
+            .reset_index(drop=True))
+
+
+def veckans_insidersignaler(tabell: pd.DataFrame, utmapp: Path, tickerfil: Path, dag=None) -> pd.DataFrame:
+    """Insidersignalerna för veckorapporten: samma regel som Insider 30/60 (insider_kandidater), för alla bolag i
+    screenerns tabell. likvid=True = omsättning ≥ 5 MSEK/dag, alltså de som strategin köper. Övriga visas
+    också men gråmarkeras. Påverkar inte momentumrankningen."""
+    import innehav as ih
+    dag = pd.Timestamp(dag or dt.date.today())
+    t = tabell.copy()
+    if "bolag" not in t.columns:
+        t["bolag"] = t["ticker"].map(sc.bolagsnyckel)
+    aff = insider_affarer(utmapp, tickerfil)
+    if aff.empty:
+        return pd.DataFrame()
+    kurser = ih.las_kurser(Path(utmapp) / "kurser.csv")
+    kand = insider_kandidater(aff, rapportkalender(utmapp), dag, t[["ticker", "bolag"]], borsvarden(utmapp), kurser)
+    if kand.empty:
+        return kand
+    extra = t.set_index("ticker")
+    kand["namn"] = kand["ticker"].map(extra["namn"]) if "namn" in extra.columns else ""
+    kand["omsattning_sek"] = kand["ticker"].map(extra["omsattning_sek"])
+    kand["likvid"] = kand["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]
+    kand["plats"] = kand["ticker"].map(extra["plats"]) if "plats" in extra.columns else np.nan
+    kand["godkand"] = kand["ticker"].map(extra["godkand"]) if "godkand" in extra.columns else False
+    return kand.sort_values(["likvid", "andel", "netto_sek"], ascending=[False, False, False],
+                            na_position="last").reset_index(drop=True)

@@ -31,6 +31,8 @@ Strategier (bestämda i förväg, se STRATEGIER nedan och README):
   slump         20 slumpvisa bland godkända – visar hur mycket som är tur
   manad         som Momentum v1, men agerar bara första lördagen i varje månad
   kvartal       som Momentum v1, men agerar bara första lördagen i varje kvartal
+  insider30     köper efter insiderköp 31–60 dagar före rapport, säljer 30 dagar efter rapporten
+  insider60     samma köp, säljer 60 dagar efter rapporten
 
 Filer: <utmapp>/strategier/<id>/
   innehav.csv     nuvarande innehav (samma format som din innehav.csv)
@@ -85,6 +87,8 @@ STANDARD = {
     "dagligt": False,        # SÄLJ-reglerna (stopp, MA200, MA50) kollas varje vardag, inte bara lördag
     "rytm": "vecka",         # hur ofta boten agerar: "vecka", "manad" (första lördagen i ny månad)
                              # eller "kvartal" (första lördagen i januari, april, juli, oktober)
+    "kalla": "screener",     # var köpen kommer ifrån: "screener" (veckorapporten) eller "insider" (insynsköp)
+    "salj_efter_rapport": None,  # insider: sälj vid första veckokörningen minst så här många dagar efter rapporten
 }
 STRATEGIER = {
     "momentum_v1": {"namn": "Momentum v1", "kort": "Veckorapporten som den är"},
@@ -106,7 +110,16 @@ STRATEGIER = {
               "rytm": "manad"},
     "kvartal": {"namn": "Kvartalsvis", "kort": "Som Momentum v1, men säljer, köper och trimmar bara en gång per kvartal",
                 "rytm": "kvartal"},
+    # Insider: köper när insiders köpt netto och nästa rapport är 31–60 dagar bort (signaler.insider_kandidater).
+    # Ingen screener, inga trend- eller stoppregler – bara tiden styr försäljningen. Omsättning minst 5 MSEK/dag.
+    "insider30": {"namn": "Insider 30", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None, "salj_rank": None,
+                  "krav_urval": False,
+                  "kort": "Köper efter insiderköp 31–60 dagar före rapport, säljer 30 dagar efter rapporten"},
+    "insider60": {"namn": "Insider 60", "kalla": "insider", "salj_efter_rapport": 60, "stopp": None, "salj_rank": None,
+                  "krav_urval": False,
+                  "kort": "Köper efter insiderköp 31–60 dagar före rapport, säljer 60 dagar efter rapporten"},
 }
+INSIDER_RESERV_DAGAR = 120   # hittas ingen rapport efter köpet: sälj så här många dagar efter köpet + salj_efter_rapport
 
 
 def _kvartal(datum: str) -> str:
@@ -439,6 +452,115 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | No
                   ("kvartalsgenomgång" if S["rytm"] == "kvartal" else "månadsgenomgång") if manadsgenomgang else "")
 
 
+def ar_insider(sid: str) -> bool:
+    return inst(sid)["kalla"] == "insider"
+
+
+def insider_saljdag(sid: str, ticker: str, kopdatum, kalender: dict) -> tuple[pd.Timestamp, pd.Timestamp | None]:
+    """(tidigaste säljdag, rapportdatum) för ett insiderinnehav: N dagar efter första rapporten efter köpet."""
+    import signaler as sg
+    n = inst(sid)["salj_efter_rapport"]
+    rap = sg.nasta_rapport(kalender, _bolag(ticker), kopdatum)
+    if rap is not None and (rap - pd.Timestamp(kopdatum)).days <= INSIDER_RESERV_DAGAR:
+        return rap + pd.Timedelta(days=n), rap
+    return pd.Timestamp(kopdatum) + pd.Timedelta(days=INSIDER_RESERV_DAGAR + n), None
+
+
+def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurser: pd.DataFrame,
+                kandidater: pd.DataFrame, kalender: dict, demo: bool = False) -> str:
+    """En veckas beslut för en insiderstrategi.
+      1. Sälj innehav där N dagar gått sedan rapporten som följde efter köpet.
+      2. Köp kandidater (signaler.insider_kandidater) i ordning, lika vikt, högst max_innehav.
+    Samma courtage, spread, utdelningshantering och filer som de andra strategierna."""
+    S = inst(sid)
+    m = mapp(utmapp, sid, demo)
+    t = las_tillstand(m)
+    rdatum = dt.date.fromisoformat(rapport)
+    if t and t["senaste_rapport"] >= rapport:
+        return f"{sid}: {rapport} redan körd"
+    if t is None:
+        t = {"startkapital": STARTKAPITAL, "kassa": STARTKAPITAL, "start": rapport, "senaste_rapport": "",
+             "senaste_manad": rapport[:7], "senaste_kvartal": _kvartal(rapport), "namn": STRATEGIER[sid]["namn"]}
+    k = kurser[kurser.index <= pd.Timestamp(rdatum)]
+    inn = ih.las_innehav(m / "innehav.csv")
+    bas_tickers = list(tabell["ticker"]) + list(inn["ticker"])
+    breda = k[[c for c in dict.fromkeys(bas_tickers) if c in k.columns]].notna().sum(axis=1)
+    handelsdag = breda[breda >= 0.5 * breda.max()].index.max() if len(breda) and breda.max() > 0 else k.index.max()
+    t.setdefault("start_handelsdag", str(handelsdag.date()))
+    avsl = ih.las_affarer(m / "avslutade.csv")
+    logg = las_logg(m)
+    kassa = float(t["kassa"])
+    nya_logg, nya_avsl = [], []
+
+    def logga(handling, ticker, antal, kurs, brutto, ct, flode, orsak, bas=np.nan, utd=0.0):
+        nya_logg.append({"datum": handelsdag, "rapport": rapport, "handling": handling, "ticker": ticker,
+                         "antal": antal, "kurs": kurs, "brutto": brutto, "courtage": ct, "utdelning": utd,
+                         "kassaflode": flode, "kassa_efter": kassa, "plats": np.nan, "bas": bas, "orsak": orsak})
+
+    # 1. Försäljning när tiden gått ut
+    for i, h in inn.iterrows():
+        saljdag, rap = insider_saljdag(sid, h["ticker"], h["kopdatum"], kalender)
+        if pd.Timestamp(rdatum) < saljdag:
+            continue
+        stang = _kurs(k, h["ticker"])
+        if stang is None:
+            continue
+        antal = h["antal"]
+        pris = stang * (1 - SPREAD)
+        brutto = pris * antal
+        varde = (aktievarde(k, logg, h["ticker"]) or stang) * (1 - SPREAD) * antal
+        utd = varde - brutto
+        ct = courtage(brutto)
+        netto = varde - ct
+        kassa += netto
+        orsak = (f"{S['salj_efter_rapport']} dagar efter rapporten {rap:%Y-%m-%d}" if rap is not None
+                 else f"ingen rapport hittad – {INSIDER_RESERV_DAGAR + S['salj_efter_rapport']} dagar efter köpet")
+        if utd > 0.5:
+            orsak += f" (inkl. utdelning {utd:,.0f} kr)".replace(",", " ")
+        nya_avsl.append({"ticker": h["ticker"], "typ": "momentum", "kopdatum": h["kopdatum"], "kopkurs": h["kopkurs"],
+                         "saljdatum": handelsdag, "saljkurs": netto / antal, "antal": antal, "valuta": "SEK",
+                         "fx_kop": 1.0, "fx_salj": 1.0, "resultat_sek": netto - h["kopkurs"] * antal,
+                         "orsak": orsak, "notering": ""})
+        logga("SÄLJ", h["ticker"], antal, pris, brutto, ct, netto, orsak, utd=utd)
+        inn.loc[i, "antal"] = 0
+    inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
+
+    # 2. Köp
+    salda = {r["ticker"] for r in nya_logg}
+    agda = {_bolag(x) for x in inn["ticker"]}
+    kand = kandidater[~kandidater["bolag"].isin(agda) & ~kandidater["ticker"].isin(salda)] if len(kandidater) else kandidater
+    lediga = S["max_innehav"] - len(inn)
+    mal = (kassa + portfoljvarde(inn, k, logg)) / S["max_innehav"]
+    nya_rader = []
+    for r in kand.head(max(lediga, 0)).itertuples():
+        stang = _kurs(k, r.ticker)
+        if stang is None or stang <= 0:
+            continue
+        pris = stang * (1 + SPREAD)
+        antal = math.floor(min(mal, kassa) / (pris * (1 + COURTAGE_PROCENT)))
+        while antal >= 1 and pris * antal + courtage(pris * antal) > kassa:
+            antal -= 1
+        brutto = pris * antal
+        if antal < 1 or brutto < MIN_KOP_SEK:
+            break
+        ct = courtage(brutto)
+        kassa -= brutto + ct
+        andel = f", {r.andel * 100:.3f} % av börsvärdet" if pd.notna(r.andel) else ""
+        orsak = (f"insiderköp netto {r.netto_sek / 1e6:.1f} MSEK ({r.kopare} köpare{andel}), "
+                 f"rapport {pd.Timestamp(r.nasta_rapport):%Y-%m-%d} om {r.dagar_till_rapport} dagar")
+        nya_rader.append({"ticker": r.ticker, "typ": "momentum", "kopdatum": handelsdag,
+                          "kopkurs": (brutto + ct) / antal, "antal": antal, "valuta": "SEK",
+                          "notering": f"rapport {pd.Timestamp(r.nasta_rapport):%Y-%m-%d}"})
+        logga("KÖP", r.ticker, antal, pris, brutto, ct, -(brutto + ct), orsak, bas=stang)
+    if nya_rader:
+        inn = pd.concat([inn, pd.DataFrame(nya_rader)], ignore_index=True)
+    alla = pd.concat([logg, pd.DataFrame(nya_logg, columns=LOGG_KOLUMNER)], ignore_index=True) if nya_logg else logg
+    upd = dict(senaste_rapport=rapport, senaste_manad=rapport[:7], senaste_kvartal=_kvartal(rapport),
+               senaste_handelsdag=str(handelsdag.date()))
+    return _spara(sid, m, t, inn, avsl, alla, nya_avsl, nya_logg, kassa, handelsdag, upd,
+                  f"{len(kandidater)} kandidater")
+
+
 def _spara(sid, m, t, inn, avsl, logg, nya_avsl, nya_logg, kassa, handelsdag, upd: dict, extra: str) -> str:
     m.mkdir(parents=True, exist_ok=True)
     inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
@@ -471,6 +593,21 @@ def kor_alla(utmapp: Path, demo: bool = False, rapportfil: Path | None = None) -
         return ["Ingen veckorapport hittades – kör screener.py först."]
     kurser = ih.las_kurser(utmapp / "kurser.csv")
     ut = []
+    insiderdata = {}
+
+    def insider(tabell: pd.DataFrame, rapport: str) -> tuple[pd.DataFrame, dict]:
+        """Insyn och rapportkalender läses en gång per körning (bara om en insiderstrategi ska köras)."""
+        import screener as sc
+        import signaler as sg
+        if not insiderdata:
+            tickerfil = Path(__file__).resolve().parent / "tickers_se.csv"
+            insiderdata.update(aff=sg.insider_affarer(utmapp, tickerfil), kal=sg.rapportkalender(utmapp),
+                               bv=sg.borsvarden(utmapp))
+        lik = tabell[tabell["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]][["ticker", "bolag"]]
+        kand = sg.insider_kandidater(insiderdata["aff"], insiderdata["kal"], pd.Timestamp(rapport), lik,
+                                     insiderdata["bv"], kurser)
+        return kand, insiderdata["kal"]
+
     for sid in STRATEGIER:
         t = las_tillstand(mapp(utmapp, sid, demo))
         if t is None:
@@ -485,6 +622,10 @@ def kor_alla(utmapp: Path, demo: bool = False, rapportfil: Path | None = None) -
                 tabell = pd.read_csv(f)
                 if "bolag" not in tabell.columns:
                     tabell["bolag"] = tabell["ticker"].map(_bolag)
+                if ar_insider(sid):
+                    kand, kal = insider(tabell, rapport)
+                    ut.append(kor_insider(sid, utmapp, rapport, tabell, kurser, kand, kal, demo))
+                    continue
                 nk = las_nyckeltal(utmapp, dt.date.fromisoformat(rapport)) if inst(sid)["nyckeltal"] else None
                 ut.append(kor_strategi(sid, utmapp, rapport, tabell, kurser, nk, demo))
             except Exception as fel:  # en strategi som felar får inte stoppa de andra

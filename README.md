@@ -78,7 +78,7 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `blankning/` | `senaste.csv` = dagens blankning per bolag, `andringar.csv` = alla förändringar sedan start (append) – går inte att återskapa | **Aldrig** |
 | `rapporter/` | `historik.csv` = senaste kända läget per rapport. `andringar.csv` = bara nya och ändrade rader, läggs till varje vecka. `2026-10-19.csv` = startläget från första hämtningen | **Aldrig** |
 | `koppling_lei.csv` | Koppling LEI-kod → bolag för blankningen, byggs om varje vecka av `signaler.py` | Ja – byggs om |
-| `analys/` | Resultat från `rapportanalys.py` | Ja – skapas om |
+| `analys/` | Resultat från `rapportanalys.py` och `insideranalys.py` | Ja – skapas om |
 | `backtest/` | Resultat från `backtest.py` (en mapp per period) och 5 års kurser i `backtest/data/` | Ja – skapas om vid nästa backtest |
 | `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
@@ -270,6 +270,8 @@ Det enda sättet att veta om en strategi fungerar är att se den gå framåt i t
 | Månadsvis | Säljer, köper och trimmar bara första lördagen i varje ny månad. Däremellan rörs ingenting – inte heller vid stopp | Säljer veckobeslutet bort avkastning genom för många affärer? |
 | Kvartalsvis | Som Månadsvis, men bara första lördagen i januari, april, juli och oktober | Ännu färre affärer – hur långsamt kan man vara? |
 | Slumpportfölj | Köper slumpvisa aktier bland de godkända (som klarar trendfiltren). Ingen rankningsregel vid sälj – annars samma säljregler | Hur mycket ger ren tur? Måttstocken för alla andra |
+| Insider 30 | Köper när insiders köpt netto (publicerat fredag–torsdag, första veckan i en köpvåg) och nästa rapport är 31–60 dagar bort. Omsättning minst 5 MSEK/dag. Säljer vid första veckokörningen 30 dagar efter rapporten. Inga trend- eller stoppregler | Vet insiders något om rapporten? (insideranalysen: +1,2 % reaktion, 8 av 9 år) |
+| Insider 60 | Samma köp, säljer 60 dagar efter rapporten | Lönar det sig att hålla kvar pengarna i stället för att vänta i kassa? |
 
 B, C och Momentum + kvalitet behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie poäng tas den inte bort i B och räknas som medel (50) i C och Momentum + kvalitet. Slumpportföljens lottning bestäms av strategi och datum, så en omkörning ger samma lottning.
 
@@ -299,6 +301,14 @@ cd ~/screener
 ```
 
 Första körningen per dag hämtar 5 års kurser och omsättning för alla aktier (några minuter). Resten av dagen återanvänds de. Resultatet visas på webbsidan under **Strategier → Backtest**, med en flik per period du kört, och skrivs också ut i terminalen. Körs samma period igen skrivs den över.
+
+**Insiderstrategierna** testas för sig, så långt bakåt som insynsdatan räcker (sedan 2018), med insideranalysens 10-årskurser:
+
+```bash
+./venv/bin/python backtest.py --insider      # Insider 30 och Insider 60 sedan 2018 (några minuter)
+```
+
+Varje lördag används bara insynsaffärer som var publicerade senast torsdagen innan, och rapportdatumen från `rapporter/historik.csv` (svenska bolag publicerar sin finansiella kalender i förväg). Resultatet hamnar i `backtest/insider_<n>m/`.
 
 **Bara prisbaserade strategier kan testas bakåt:** Momentum v1, Topp 10, Utan urvalsregler, Daglig stopp, Månadsvis, Kvartalsvis och Slumpportfölj. B, C och Momentum + kvalitet behöver nyckeltalen som de såg ut då, och de sparas först sedan oktober 2026. Med dagens nyckeltal skulle testet veta saker som ingen visste då.
 
@@ -362,6 +372,19 @@ Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andr
 | Omsättning −5 → −1 mot normalt | Ovanlig omsättning före rapporten |
 
 Rapporterna delas i fem lika stora grupper efter EPS-överraskningen och efter kursreaktionen, och varje grupps drift visas – även år för år och efter kostnad (0,7 % per affär). Resultatet sparas i `analys/rapportanalys_DATUM.html` (öppna från Windows) och `.md`, och varje rapport med sina mått i `analys/rapporthandelser.csv`.
+
+Rapporter som Yahoo listar två gånger inom 20 dagar slås ihop. Tabellen *Täckning* visar hur många rapporter varje år som har data för varje mått.
+
+## Insideranalys: går aktier bättre efter insiderköp?
+
+`insideranalys.py` är samma sorts händelsestudie på FI:s insynsregister. En händelse är första veckan i en köpvåg: insiders har köpt netto den veckan (efter **publiceringsdag**) och bolaget har inte haft en köpvåg de fyra veckorna innan. Köp räknas på stängningskursen första handelsdagen efter veckan, och avkastningen mäts mot marknaden 20, 60 och 120 handelsdagar framåt.
+
+```bash
+./venv/bin/python insideranalys.py           # 5 års kurser (samma cache som backtest)
+./venv/bin/python insideranalys.py --ar 10   # hämtar 10 års kurser (insyn finns sedan 2016)
+```
+
+Köpen delas upp efter storlek i procent av börsvärdet, antal köpare, befattning (vd, ekonomichef, styrelse, övriga), personen själv eller närstående, dagar sedan och till rapport, kluster (minst 3 köpare inom 4 veckor) och år. Försäljningar visas som jämförelse. Resultat i `analys/insideranalys_DATUM.html` och `.md`, och varje händelse i `analys/insiderhandelser.csv`.
 
 ## Köra automatiskt varje vecka
 

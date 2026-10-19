@@ -399,13 +399,70 @@ def bortfall_per_orsak(tabell: pd.DataFrame) -> list[tuple[str, int]]:
     return sorted(antal.items(), key=lambda x: -x[1])
 
 
-def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo, utv_rader=()):
+GULD_TEXT = ("Insiders har köpt netto (publicerat fredag–torsdag, första veckan i en köpvåg) och nästa rapport är "
+             "31–60 dagar bort – samma regel som strategin Insider 30. Insideranalysen: slog marknaden efter kostnad "
+             "8 av 9 år, nästa rapports reaktion +1,2 %. UNDER VALIDERING – påverkar inte momentumrankningen.")
+
+
+def _guld_rad(r) -> dict:
+    andel = f"{r.andel * 100:.3f} %" if pd.notna(r.andel) else "–"
+    plats = f"plats {int(r.plats)}" if pd.notna(r.plats) else ("klarar trendfilter" if r.godkand else "ej i momentumlistan")
+    return {"ticker": r.ticker, "namn": r.namn if isinstance(r.namn, str) else "", "netto": f"{r.netto_sek / 1e6:.1f} MSEK",
+            "andel": andel, "kopare": str(int(r.kopare)), "rapport": f"{pd.Timestamp(r.nasta_rapport):%Y-%m-%d}",
+            "dagar": str(int(r.dagar_till_rapport)),
+            "oms": f"{r.omsattning_sek / 1e6:.0f}" if pd.notna(r.omsattning_sek) else "–", "plats": plats,
+            "likvid": bool(r.likvid)}
+
+
+def guld_markdown(guld) -> list[str]:
+    if guld is None:
+        return []
+    ut = ["## ★ Insidersignaler denna vecka", "", GULD_TEXT, ""]
+    if not len(guld):
+        return ut + ["Inga signaler denna vecka.", ""]
+    rader = [_guld_rad(r) for r in guld.itertuples()]
+    ut += ["| | Aktie | Insiders netto (4 v) | Av börsvärdet | Köpare | Rapport | Dagar kvar | Oms/dag MSEK | Momentum |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    ut += [f"| {'★' if r['likvid'] else '·'} | {r['ticker']} {r['namn']} | {r['netto']} | {r['andel']} | {r['kopare']} | "
+           f"{r['rapport']} | {r['dagar']} | {r['oms']} | {r['plats']} |" for r in rader]
+    if not all(r["likvid"] for r in rader):
+        ut += ["", "· = omsättning under 5 MSEK/dag – strategin köper inte dessa."]
+    return ut + [""]
+
+
+def guld_html(guld) -> str:
+    e = html.escape
+    if guld is None:
+        return ""
+    if not len(guld):
+        inne = '<p class="muted small" style="margin:6px 0 0">Inga signaler denna vecka.</p>'
+    else:
+        rader = []
+        for r in (_guld_rad(x) for x in guld.itertuples()):
+            rader.append(f'<tr class="{"" if r["likvid"] else "tunn"}"><td><b data-t="{e(r["ticker"])}">'
+                         f'{"★ " if r["likvid"] else ""}{e(r["ticker"].removesuffix(".ST"))}</b><br>'
+                         f'<span class="muted">{e(r["namn"])}</span></td><td class="num">{e(r["netto"])}</td>'
+                         f'<td class="num">{e(r["andel"])}</td><td class="num">{e(r["kopare"])}</td>'
+                         f'<td class="num">{e(r["rapport"])}</td><td class="num"><b>{e(r["dagar"])}</b></td>'
+                         f'<td class="num">{e(r["oms"])}</td><td>{e(r["plats"])}</td></tr>')
+        inne = ('<div class="wrap" style="margin-top:8px"><table style="min-width:720px"><thead><tr><th>Aktie</th>'
+                '<th class="num">Insiders netto (4 v)</th><th class="num">Av börsvärdet</th><th class="num">Köpare</th>'
+                '<th class="num">Rapport</th><th class="num">Dagar kvar</th><th class="num">Oms/dag MSEK</th>'
+                f'<th>Momentum</th></tr></thead><tbody>{"".join(rader)}</tbody></table></div>')
+        if any(not x for x in guld["likvid"]):
+            inne += '<p class="muted small">Grå rad = omsättning under 5 MSEK/dag – strategin köper inte dessa.</p>'
+    return (f'<section class="guld"><h2>★ Insidersignaler denna vecka <span class="tag guldtag">under validering</span></h2>'
+            f'<p class="small" style="margin:4px 0 0">{e(GULD_TEXT)}</p>{inne}</section>')
+
+
+def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo, utv_rader=(), guld=None):
     n_godk = int(tabell["godkand"].sum())
     delar = [f"# Momentum-screener – {idag}" + (" (DEMODATA)" if demo else ""),
              "",
              f"Analyserade: {len(tabell)} bolag · Klarade filtren: {n_godk} "
              f"({n_godk / len(tabell) * 100:.0f} %) · Saknade data: {len(saknade)}",
              "",
+             *guld_markdown(guld),
              f"## Topp {KONFIG['topp_n']}",
              "",
              "✓ = klarar urvalsreglerna (1 mån ≤ "
@@ -447,7 +504,7 @@ def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute
     fil.write_text("\n".join(delar) + "\n", encoding="utf-8")
 
 
-def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo):
+def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, bredd, demo, guld=None):
     e = html.escape
     n_godk = int(tabell["godkand"].sum())
     andel = n_godk / len(tabell) * 100
@@ -463,8 +520,10 @@ def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, br
     rader = []
     for r in topp.itertuples():
         ny = ' <span class="tag">ny</span>' if nya and r.ticker in nya else ""
+        guldrad = bool(getattr(r, "insider_signal", False))
+        ny += ' <span class="tag guldtag">★ insider</span>' if guldrad else ""
         rader.append(
-            f'<tr class="{"urval" if r.urval else ""}" title="{e(r.urval_orsak or "Klarar urvalsreglerna")}">'
+            f'<tr class="{"urval" if r.urval else ""}{" guldrad" if guldrad else ""}" title="{e(r.urval_orsak or "Klarar urvalsreglerna")}">'
             f'<td class="num">{int(r.plats)}</td>'
             f'<td><b data-t="{e(r.ticker)}">{e(r.ticker.removesuffix(".ST"))}</b>{ny}<br><span class="muted">{e(r.namn)}</span></td>'
             f'<td class="num"><b>{r.poang:.0f}</b></td>'
@@ -541,6 +600,12 @@ table {{ border-collapse:collapse; width:100%; min-width:860px }}
 th,td {{ padding:8px 10px; border-bottom:1px solid var(--linje); text-align:left; vertical-align:top }}
 th {{ font-size:12px; color:var(--muted); font-weight:600; white-space:nowrap; position:sticky; top:0; background:var(--kort) }}
 tr.urval td {{ background:var(--urval) }}
+tr.guldrad td:first-child {{ box-shadow: inset 4px 0 0 #d4a017 }}
+.guld {{ border:2px solid #d4a017; background:rgba(212,160,23,.10); border-radius:10px; padding:14px 16px; margin:16px 0 }}
+.guld h2 {{ margin:0; font-size:18px; color:#b8860b }}
+.guld table {{ min-width:720px }} .guld tr.tunn td {{ opacity:.55 }}
+.guldtag {{ background:#d4a017 !important; color:#1c1f24 !important }}
+@media (prefers-color-scheme: dark) {{ .guld h2 {{ color:#f0c040 }} }}
 .num {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }} .mid {{ text-align:center }}
 .pos {{ color:var(--pos) }} .neg {{ color:var(--neg) }}
 .tag {{ font-size:11px; background:var(--accent); color:#fff; border-radius:4px; padding:1px 5px; margin-left:4px }}
@@ -561,6 +626,7 @@ footer {{ margin-top:24px; font-size:12px; color:var(--muted) }}
   <div class="stat"><span class="muted small">Klarar trendfiltren</span><b>{n_godk} <span class="muted small">({andel:.0f} %)</span></b></div>
   <div class="stat"><span class="muted small">Urval i topp {KONFIG['topp_n']}</span><b>{int(topp['urval'].sum())}</b></div>
 </div>
+{guld_html(guld)}
 <div class="wrap"><table>
 <thead><tr><th>#</th><th>Aktie</th><th class="num">Poäng</th><th class="mid">Urval</th>
 <th class="num">12-1 mån</th><th class="num">6 mån</th><th class="num">1 mån</th>
@@ -579,7 +645,7 @@ volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %. Håll muspekaren 
     fil.write_text(sida, encoding="utf-8")
 
 
-def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader=()) -> list[Path]:
+def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader=(), guld=None) -> list[Path]:
     utmapp.mkdir(parents=True, exist_ok=True)
     idag = dt.date.today().isoformat()
 
@@ -606,8 +672,8 @@ def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader
     md = utmapp / f"rapport_{idag}.md"
     ht = utmapp / f"rapport_{idag}.html"
     args = (idag, tabell, topp, saknade, analys, nya, ute, bredd, demo)
-    skriv_markdown(md, *args, utv_rader=utv_rader)
-    skriv_html(ht, *args)
+    skriv_markdown(md, *args, utv_rader=utv_rader, guld=guld)
+    skriv_html(ht, *args, guld=guld)
     # senaste.html skrivs alltid över – bokmärk den
     (utmapp / "senaste.html").write_text(ht.read_text(encoding="utf-8"), encoding="utf-8")
     return [md, ht, csv_fil]
@@ -698,9 +764,18 @@ def main() -> int:
     except Exception as fel:
         print(f"Insyn/blankning kunde inte läggas till: {type(fel).__name__}: {fel}", file=sys.stderr)
 
+    # Insidersignaler (samma regel som strategin Insider 30) – visas överst i rapporten, ändrar ingen rankning
+    guld = None
+    try:
+        import signaler
+        guld = signaler.veckans_insidersignaler(tabell, utmapp, Path(a.tickers))
+        tabell["insider_signal"] = tabell["ticker"].isin(set(guld["ticker"])) if guld is not None and len(guld) else False
+    except Exception as fel:
+        print(f"Insidersignalerna kunde inte räknas: {type(fel).__name__}: {fel}", file=sys.stderr)
+
     analys = ih.analysera(innehav_df, stangning, tabell)
     utv_rader = ih.utveckling_markdown(innehav_df, affarer_df, stangning)
-    filer = skriv_rapporter(tabell, saknade, analys, utmapp, a.demo, utv_rader)
+    filer = skriv_rapporter(tabell, saknade, analys, utmapp, a.demo, utv_rader, guld)
     print(filer[0].read_text(encoding="utf-8"))
     for f in filer:
         print(f"Sparad: {f}", file=sys.stderr)

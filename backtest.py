@@ -23,6 +23,7 @@ Körning (på servern, tar några minuter första gången):
   ./venv/bin/python backtest.py                # senaste 6 månaderna
   ./venv/bin/python backtest.py --manader 24   # senaste 2 åren
   ./venv/bin/python backtest.py --demo         # påhittade kurser, utan internet
+  ./venv/bin/python backtest.py --insider      # Insider 30/60 sedan 2018 (insynsdatan, 10 års kurser)
 
 Resultatet sparas i <utmapp>/backtest/<n>m/ och visas på webbsidan under Strategier → Backtest.
 Kurserna sparas i <utmapp>/backtest/data/ och återanvänds samma dag.
@@ -38,6 +39,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 import innehav as ih
@@ -49,7 +51,11 @@ MAX_MANADER = 45          # 5 års historik minus de ~13 månader som krävs inn
 
 
 def prisbaserade() -> list[str]:
-    return [sid for sid in st.STRATEGIER if not st.inst(sid)["nyckeltal"]]
+    return [sid for sid in st.STRATEGIER if not st.inst(sid)["nyckeltal"] and not st.ar_insider(sid)]
+
+
+def insiderstrategier() -> list[str]:
+    return [sid for sid in st.STRATEGIER if st.ar_insider(sid)]
 
 
 def hamta_data(utmapp: Path, tickers: list[str], demo: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -149,6 +155,123 @@ def kor(utmapp: Path, manader: int, demo: bool = False, tickerfil: Path | None =
     return rot
 
 
+def insiderdata(utmapp: Path, demo: bool = False, tickerfil: Path | None = None) -> dict:
+    """Allt insiderbacktestet behöver: 10-årskurser, volym, insynsaffärer, rapportkalender, börsvärden,
+    omsättning (snitt 20 dagar) och ett aktieslag per bolag (det mest omsatta)."""
+    import insideranalys as ia
+    import rapportanalys as ra
+    import signaler as sg
+    tickerfil = tickerfil or MAPP / "tickers_se.csv"
+    lista = sc.las_tickers(tickerfil)
+    kurser, volym = ia.las_kurser(utmapp, list(lista["ticker"]), 10, demo)
+    kurser = kurser[~kurser.index.duplicated()].sort_index()
+    volym = volym[~volym.index.duplicated()].sort_index().reindex(kurser.index)
+    if demo:
+        aff = ia.demo_affarer(kurser).sort_values("publicerad").reset_index(drop=True)
+        r = ra.demo_rapporter(kurser)
+        r["bolag"] = r["ticker"].map(sc.bolagsnyckel)
+        kal = {b: np.unique(g["rapportdatum"].to_numpy(dtype="datetime64[D]")) for b, g in r.groupby("bolag")}
+        bv = {sc.bolagsnyckel(t): 5e9 for t in kurser.columns}
+    else:
+        print("Läser insynsaffärer och rapportdatum ...", file=sys.stderr)
+        aff, kal, bv = sg.insider_affarer(utmapp, tickerfil), sg.rapportkalender(utmapp), sg.borsvarden(utmapp)
+    if aff.empty:
+        raise SystemExit("Ingen insynsdata – kör insamling.py först.")
+    return {"kurser": kurser, "volym": volym, "aff": aff, "kal": kal, "bv": bv,
+            "oms": (kurser * volym).rolling(20, min_periods=10).mean(),
+            "bolag_ticker": ia.ticker_per_bolag(kurser, volym)}
+
+
+def insider_lordagar(data: dict, manader: int | None = None) -> pd.DatetimeIndex:
+    kurser, aff = data["kurser"], data["aff"]
+    sista = kurser.index.max()
+    start = max(aff["publicerad"].min() + pd.Timedelta(weeks=6), kurser.index[25])
+    if manader:
+        start = max(start, sista - pd.DateOffset(months=manader))
+    lordagar = pd.date_range(start.normalize(), sista, freq="W-SAT")
+    if sista.weekday() == 4 and (not len(lordagar) or lordagar[-1] < sista):
+        lordagar = lordagar.append(pd.DatetimeIndex([sista + pd.Timedelta(days=1)]))
+    return lordagar
+
+
+def likvida(data: dict, lor: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(alla, likvida) – en rad per bolag med tickern och omsättningen på lördagens senaste handelsdag."""
+    dag = data["kurser"].index[data["kurser"].index <= lor]
+    o = data["oms"].loc[dag[-1]] if len(dag) else pd.Series(dtype=float)
+    tabell = pd.DataFrame([{"ticker": t, "bolag": b, "omsattning_sek": o.get(t, np.nan)}
+                           for b, t in data["bolag_ticker"].items()])
+    return tabell, tabell[tabell["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]]
+
+
+def simulera_insider(rot: Path, data: dict, lordagar: pd.DatetimeIndex, varianter: dict) -> int:
+    """Kör insiderstrategier vecka för vecka i rot/strategier/. varianter = {sid: {"fonster": (31, 60),
+    "fordrojning": 0 (veckor), "slump": False}}. Strategierna måste finnas i strategier.STRATEGIER.
+    slump=True: lika många slumpvisa likvida aktier som insidersignalerna, med rapport inom samma fönster."""
+    import zlib
+    import signaler as sg
+    t0, antal_kand, tidigare = time.time(), 0, {}
+    for i, lor in enumerate(lordagar, 1):
+        tabell, lik = likvida(data, lor)
+        if not len(tabell):
+            continue
+        rapport = lor.date().isoformat()
+        cache = {}
+        for sid, v in varianter.items():
+            fonster = v.get("fonster", sg.INSIDER_RAPPORT_FONSTER)
+            if fonster not in cache:
+                cache[fonster] = sg.insider_kandidater(data["aff"], data["kal"], lor, lik, data["bv"], data["kurser"],
+                                                       fonster=fonster)
+            kand = cache[fonster]
+            if v.get("slump"):
+                pool = []
+                for r in lik.itertuples():
+                    nr = sg.nasta_rapport(data["kal"], r.bolag, lor)
+                    if nr is not None and fonster[0] <= (nr - lor).days <= fonster[1]:
+                        pool.append({"ticker": r.ticker, "bolag": r.bolag, "netto_sek": 0.0, "kopare": 0,
+                                     "nasta_rapport": nr, "dagar_till_rapport": (nr - lor).days, "andel": np.nan})
+                rng = np.random.default_rng(zlib.crc32(f"{sid}{rapport}".encode()))
+                pool = pd.DataFrame(pool, columns=kand.columns)
+                kand = pool.iloc[rng.permutation(len(pool))[:len(kand)]].reset_index(drop=True)
+            f = v.get("fordrojning", 0)
+            if f:
+                kö = tidigare.setdefault(sid, [])
+                kö.append(kand)
+                kand = kö.pop(0) if len(kö) > f else kand.iloc[0:0]
+            if sid == next(iter(varianter)):
+                antal_kand += len(kand)
+            st.kor_insider(sid, rot, rapport, lik if len(lik) else tabell, data["kurser"], kand, data["kal"])
+        if i % 52 == 0 or i == len(lordagar):
+            print(f"  vecka {i}/{len(lordagar)} ({time.time() - t0:.0f} s)", file=sys.stderr)
+    return antal_kand
+
+
+def kor_insider(utmapp: Path, demo: bool = False, tickerfil: Path | None = None, manader: int | None = None) -> Path:
+    """Backtest av insiderstrategierna så långt bakåt som insynsdatan räcker (sedan 2018).
+    Använder insideranalysens 10-årskurser (analys/kurser_10y.csv) – hämtas om de saknas.
+    Varje lördag: kandidater från insyn publicerad fredag–torsdag, nästa rapport om 31–60 dagar,
+    omsättning (snitt 20 dagar) minst 5 MSEK. Ett aktieslag per bolag (det mest omsatta)."""
+    data = insiderdata(utmapp, demo, tickerfil)
+    lordagar = insider_lordagar(data, manader)
+    sista = data["kurser"].index.max()
+    manader_tot = round((lordagar[-1] - lordagar[0]).days / 30.44)
+    namn_kor = f"insider_{manader_tot}m" + ("_demo" if demo else "")
+    rot = utmapp / "backtest" / namn_kor
+    if rot.exists():
+        shutil.rmtree(rot)
+    rot.mkdir(parents=True)
+    ih.skriv_kurser(rot / "kurser.csv", data["kurser"])
+    sids = insiderstrategier()
+    print(f"Backtest insider {lordagar[0].date()} – {sista.date()}: {len(lordagar)} veckor, "
+          f"{len(data['aff'])} insynsaffärer, strategier: {', '.join(sids)}", file=sys.stderr)
+    antal_kand = simulera_insider(rot, data, lordagar, {sid: {} for sid in sids})
+    info = {"manader": manader_tot, "etikett": f"Insider {manader_tot} mån", "fran": str(lordagar[0].date()),
+            "till": str(sista.date()), "veckor": len(lordagar), "aktier": len(data["bolag_ticker"]),
+            "skapad": dt.datetime.now().isoformat(timespec="minutes"), "demo": demo, "strategier": sids,
+            "kandidater": antal_kand, "hoppade_over": []}
+    (rot / "info.json").write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+    return rot
+
+
 def sammanfatta(rot: Path) -> None:
     k = ih.las_kurser(rot / "kurser.csv")
     rader = [r for r in st.oversikt(rot, k) if r["startad"]]
@@ -175,7 +298,15 @@ def main() -> int:
     p.add_argument("--utmapp", default=sc.KONFIG["utmapp"])
     p.add_argument("--tickers", default=str(MAPP / "tickers_se.csv"))
     p.add_argument("--demo", action="store_true", help="påhittade kurser, utan internet")
+    p.add_argument("--insider", action="store_true",
+                   help="testa insiderstrategierna så långt bakåt som insynsdatan räcker (--manader begränsar)")
     a = p.parse_args()
+    if a.insider:
+        utmapp = Path(a.utmapp).expanduser()
+        rot = kor_insider(utmapp, a.demo, Path(a.tickers), a.manader if "--manader" in sys.argv else None)
+        sammanfatta(rot)
+        print(f"\nSparat i {rot} – visas på webbsidan under Strategier → Backtest.")
+        return 0
     if not 1 <= a.manader <= MAX_MANADER:
         print(f"--manader måste vara 1–{MAX_MANADER}", file=sys.stderr)
         return 1

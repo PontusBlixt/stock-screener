@@ -74,7 +74,33 @@ def las_rapporter(utmapp: Path) -> pd.DataFrame:
     r = r[r["rapportdatum"] < pd.Timestamp.today().normalize()]
     for k in ("eps_forvantad", "eps_utfall", "overraskning_pct"):
         r[k] = pd.to_numeric(r.get(k), errors="coerce")
-    return r.drop_duplicates(["ticker", "rapportdatum"]).sort_values(["ticker", "rapportdatum"]).reset_index(drop=True)
+    r = r.drop_duplicates(["ticker", "rapportdatum"]).sort_values(["ticker", "rapportdatum"]).reset_index(drop=True)
+    return slå_ihop_nara(r)
+
+
+def slå_ihop_nara(r: pd.DataFrame, dagar: int = 20) -> pd.DataFrame:
+    """Yahoo listar ibland samma rapport två gånger med några dagars mellanrum (förväntat och faktiskt datum).
+    Rapporter för samma bolag inom 'dagar' kalenderdagar slås ihop: den med utfall behålls, annars den första."""
+    behall = []
+    for _, g in r.groupby("ticker", sort=False):
+        grupp = []
+        for idx, d in zip(g.index, g["rapportdatum"]):
+            if grupp and (d - r.at[grupp[0], "rapportdatum"]).days > dagar:
+                behall.append(_valj(r, grupp))
+                grupp = []
+            grupp.append(idx)
+        if grupp:
+            behall.append(_valj(r, grupp))
+    ut = r.loc[behall].sort_values(["ticker", "rapportdatum"]).reset_index(drop=True)
+    if len(ut) < len(r):
+        print(f"Slog ihop {len(r) - len(ut)} rapporter som låg inom {dagar} dagar från en annan (dubbletter hos Yahoo).",
+              file=sys.stderr)
+    return ut
+
+
+def _valj(r: pd.DataFrame, idx: list) -> int:
+    med_utfall = [i for i in idx if pd.notna(r.at[i, "eps_utfall"])]
+    return med_utfall[0] if med_utfall else idx[0]
 
 
 def las_kurser(utmapp: Path, tickers: list[str], demo: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -109,6 +135,7 @@ def marknad(kurser: pd.DataFrame) -> pd.Series:
 
 def handelser(rapporter: pd.DataFrame, kurser: pd.DataFrame, volym: pd.DataFrame) -> pd.DataFrame:
     """En rad per rapport med avkastning mot marknaden i varje fönster och ovanlig omsättning."""
+    kurser = kurser[~kurser.index.duplicated()].sort_index()
     idx = marknad(kurser)
     dagar = kurser.index
     m = idx.to_numpy()
@@ -141,14 +168,20 @@ def handelser(rapporter: pd.DataFrame, kurser: pd.DataFrame, volym: pd.DataFrame
                 e["reaktion_ra"] = c[i + 1] / c[i - 1] - 1
             # Köp dag +1, sälj 5 handelsdagar före nästa rapport
             if j + 1 < len(pos) and pos[j + 1] - 5 - (i + 1) >= MIN_HANDELSDAGAR_KVARTAL:
-                e["kvartal"] = avk(1, pos[j + 1] - 5)
+                e["kvartal"] = avk(1, pos[j + 1] - 5 - i)   # avk tar dagar RELATIVT rapportdagen
                 e["kvartal_dagar"] = pos[j + 1] - 5 - (i + 1)
             # Ovanlig omsättning före rapporten
             if oms is not None and i - 60 >= 0:
-                fore, normal = np.nanmean(oms[i - 5:i]), np.nanmean(oms[i - 60:i - 20])
+                with np.errstate(all="ignore"):
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        fore, normal = np.nanmean(oms[i - 5:i]), np.nanmean(oms[i - 60:i - 20])
                 e["oms_kvot"] = fore / normal if normal and np.isfinite(normal) and normal > 0 else np.nan
             ut.append(e)
     df = pd.DataFrame(ut)
+    if df.empty:
+        return df
     df["ar"] = df["dag0"].dt.year
     return df
 
@@ -194,6 +227,7 @@ def grupper(df: pd.DataFrame, efter: str, matt: list[str], antal: int = 5) -> pd
         rad = {"grupp": gnamn, "n": len(g), "fran": g[efter].min(), "till": g[efter].max()}
         for k in matt:
             s = stat(g[k])
+            rad[k + "_median"] = s["median"]
             rad[k] = s["snitt"]
             rad[k + "_t"] = s["t"]
             rad[k + "_pos"] = s["andel_pos"]
@@ -208,9 +242,12 @@ def per_ar(df: pd.DataFrame, efter: str, matt: str) -> pd.DataFrame:
         if len(g) < 50:
             continue
         q = pd.qcut(g[efter].rank(method="first"), 5, labels=False)
-        bast, samst = g.loc[q == 4, matt], g.loc[q == 0, matt]
-        rader.append({"ar": ar, "n": len(g), "bast": bast.mean(), "samst": samst.mean(),
-                      "skillnad": bast.mean() - samst.mean(), "bast_netto": bast.mean() - KOSTNAD_TUR_RETUR})
+        # Kapa de 2 % mest extrema inom året – en enda aktie som gått +500 % ska inte avgöra ett år
+        x = g[matt].clip(g[matt].quantile(0.01), g[matt].quantile(0.99))
+        bast, samst = x[q == 4], x[q == 0]
+        rader.append({"ar": ar, "n": len(g), "bast": bast.mean(), "samst": samst.mean(), "bast_median": bast.median(),
+                      "skillnad": bast.mean() - samst.mean(), "bast_netto": bast.mean() - KOSTNAD_TUR_RETUR,
+                      "bast_max": g.loc[q == 4, matt].max()})
     return pd.DataFrame(rader)
 
 
@@ -233,6 +270,14 @@ def skriv(df: pd.DataFrame, vanliga: pd.Series, utmapp: Path, demo: bool) -> tup
          f"{len(df)} rapporter i {df['ticker'].nunique()} bolag, {df['dag0'].min():%Y-%m-%d} – {df['dag0'].max():%Y-%m-%d}. "
          "All avkastning är **jämfört med marknaden** = snittet av alla aktier i listan, samma dagar. 0 % betyder ”som en vanlig aktie”. "
          f"Kostnad för en affär fram och tillbaka räknas som {KOSTNAD_TUR_RETUR * 100:.1f} %.", ""]
+
+    # Täckning per år – visar om något år tappar rapporter (t.ex. för att nästa rapport saknas)
+    tack = df.groupby("ar").agg(n=("ticker", "size"), eps=("overraskning_pct", lambda x: x.notna().sum()),
+                                reak=("reaktion", lambda x: x.notna().sum()), kv=("kvartal", lambda x: x.notna().sum()))
+    D += ["## Täckning", "",
+          tabell(["År", "Rapporter", "Med EPS-förväntan", "Med reaktion", "Med köp-till-nästa-rapport"],
+                 [[str(int(a)), str(r.n), str(r.eps), str(r.reak), str(r.kv)] for a, r in tack.iterrows()]),
+          "", "Sista rapporten för varje bolag saknar ”till nästa rapport” (den har inte kommit än).", ""]
 
     # 1. Rapportpremie
     s_rap, s_van = stat(df["reaktion"]), stat(vanliga)
@@ -264,9 +309,9 @@ def skriv(df: pd.DataFrame, vanliga: pd.Series, utmapp: Path, demo: bool) -> tup
             spann = (f"{r.fran:.0f} … {r.till:.0f} %" if enhet == "%" else f"{r.fran * 100:+.1f} … {r.till * 100:+.1f} %")
             rader.append([f"{r.grupp}{' (sämst)' if r.grupp == '1' else ' (bäst)' if r.grupp == '5' else ''}", spann, str(r.n),
                           p(r.reaktion), p(r.drift60), f"{r.drift60_t:.1f}", p(r.drift60_pos, 0, False),
-                          p(r.kvartal), p(r.kvartal - KOSTNAD_TUR_RETUR if pd.notna(r.kvartal) else np.nan)])
+                          p(r.kvartal), p(r.kvartal_median), p(r.kvartal - KOSTNAD_TUR_RETUR if pd.notna(r.kvartal) else np.nan)])
         D += [tabell(["Grupp", "Spann", "Antal", "Reaktion", "Drift 60 d", "t", "Andel upp", "Till nästa rapport",
-                      "Efter kostnad"], rader), ""]
+                      "– median", "Efter kostnad"], rader), ""]
         b, s = g.iloc[-1], g.iloc[0]
         D += [f"Bästa minus sämsta gruppen: drift 60 dagar **{p(b['drift60'] - s['drift60'])}**, "
               f"till nästa rapport **{p(b['kvartal'] - s['kvartal'])}**. "
@@ -276,9 +321,11 @@ def skriv(df: pd.DataFrame, vanliga: pd.Series, utmapp: Path, demo: bool) -> tup
         a = per_ar(df, efter, "kvartal")
         if len(a):
             D += [f"### År för år – grupperat efter {titel}, köp efter, sälj före nästa rapport", "",
-                  tabell(["År", "Rapporter", "Bästa gruppen", "Sämsta gruppen", "Skillnad", "Bästa efter kostnad"],
-                         [[str(int(r.ar)), str(r.n), p(r.bast), p(r.samst), p(r.skillnad), p(r.bast_netto)]
-                          for r in a.itertuples()]),
+                  tabell(["År", "Rapporter", "Bästa gruppen", "– median", "Sämsta gruppen", "Skillnad", "Bästa efter kostnad",
+                          "Bästa enskilda"],
+                         [[str(int(r.ar)), str(r.n), p(r.bast), p(r.bast_median), p(r.samst), p(r.skillnad), p(r.bast_netto),
+                           p(r.bast_max, 0)] for r in a.itertuples()]),
+                  "", "Snitten per år är kapade vid 1 % och 99 % inom året så att enstaka extrema aktier inte styr.",
                   "", f"Bästa gruppen slog marknaden efter kostnad **{int((a['bast_netto'] > 0).sum())} av {len(a)} år**.", ""]
 
     # 4. Omsättning före rapport
@@ -314,7 +361,7 @@ def skriv(df: pd.DataFrame, vanliga: pd.Series, utmapp: Path, demo: bool) -> tup
     return m / f"rapportanalys_{idag}.html", md
 
 
-def _html(md: str) -> str:
+def _html(md: str, titel: str = "Rapportanalys") -> str:
     """Enkel markdown → HTML för tabellerna (inga extra paket)."""
     import re
     ut, i, rader = [], 0, md.splitlines()
@@ -348,7 +395,8 @@ def _html(md: str) -> str:
             ut.append(f"<p>{inline(r)}</p>")
         i += 1
     return ("<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>Rapportanalys</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;"
+            f"<title>{html.escape(titel)}</title>"
+            "<style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;"
             "color:#1c1f24;background:#f6f7f9}h2{margin-top:28px}.wrap{overflow-x:auto;background:#fff;border:1px solid #e5e7eb;border-radius:8px}"
             "table{border-collapse:collapse;width:100%}th,td{padding:6px 10px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap}"
             "th:first-child,td:first-child{text-align:left}th{font-size:12px;color:#6b7280}"

@@ -1093,7 +1093,7 @@ def ta_bort_affar(idx: int):
 # ---------------------------------------------------------------------------
 STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "kvalitet": "#8a63d2",
               "topp10": "#c9a227", "utan_urval": "#3fa7c9", "daglig_stopp": "#d4566a", "slump": "#9aa0a6", "manad": "#a1887f", "kvartal": "#00a88f",
-              "egen": "#b0489c"}
+              "insider30": "#e8590c", "insider60": "#5c7cfa", "egen": "#b0489c"}
 
 
 def graf_flera(serier: list[tuple[str, pd.Series, str, float]], B: int = 860) -> str:
@@ -1355,7 +1355,18 @@ def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = F
             rank = st.rangordna(sid, tab, nyck)
     except Exception:
         rank = None
-    analys = ih.analysera(inn, k, rank, {"STOPP_PROCENT": S["stopp"], "SALJ_RANK": S["salj_rank"] or 10**9}) if len(inn) else []
+    if st.ar_insider(sid):
+        # Insiderstrategierna har inga trend- eller stoppregler – bara tiden efter rapporten styr försäljningen
+        analys = ih.analysera(inn, k, None, {"STOPP_PROCENT": 10.0, "SALJ_RANK": 10**9}) if len(inn) else []
+        kal = _rapportkalender()
+        for a, h in zip(analys, inn.itertuples()):
+            saljdag, rap = st.insider_saljdag(sid, h.ticker, h.kopdatum, kal)
+            a.update(beslut="BEHÅLL", manad=[], bevaka=[], trimma=False, till_stopp=None, plats=None,
+                     signaler=[f"säljs vid veckokörningen efter {saljdag:%Y-%m-%d}"
+                               + (f" ({S['salj_efter_rapport']} d efter rapporten {rap:%Y-%m-%d})" if rap is not None else
+                                  " (inget rapportdatum hittat)")])
+    else:
+        analys = ih.analysera(inn, k, rank, {"STOPP_PROCENT": S["stopp"], "SALJ_RANK": S["salj_rank"] or 10**9}) if len(inn) else []
     v = st.vardeserie(bas, sid, k, demo)
     idx = _indexserie(k, v.index[0]) if len(v) else None
     avk = float(v["avkastning"].iloc[-1]) if len(v) else 0.0
@@ -1378,6 +1389,22 @@ def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = F
                 mot_index=avk - index_avk if index_avk is not None else None, indexnamn=indexnamn,
                 analys=analys, max=S["max_innehav"], stat=ih.affarsstatistik(avsl), graf=graf,
                 logg=list(reversed(rader)), kostnad=kostnad)
+
+
+_kal_cache: dict = {}
+
+
+def _rapportkalender() -> dict:
+    """Rapportkalendern (rapporter/historik.csv), cachad tills filen ändras."""
+    f = UTMAPP / "rapporter" / "historik.csv"
+    mt = f.stat().st_mtime if f.exists() else 0
+    if _kal_cache.get("mt") != mt:
+        try:
+            import signaler as sg
+            _kal_cache.update(mt=mt, kal=sg.rapportkalender(UTMAPP))
+        except Exception:
+            _kal_cache.update(mt=mt, kal={})
+    return _kal_cache["kal"]
 
 
 # ---------------------------------------------------------------------------
@@ -1416,7 +1443,7 @@ BACKTEST_MALL = """
 perioden räknas topplistan fram med bara de kurser som fanns då, och boten fattar sina beslut.</p>
 {% if korningar %}
 <div class="small" style="margin:8px 0 14px">Period:
-{% for b in korningar %}<a href="{{ url_for('backtest_sida', kor=b.namn) }}" style="margin-left:10px;{{ 'font-weight:700;color:var(--text)' if b.namn == bt.namn }}">{{ b.manader }} mån{{ ' (demo)' if b.demo }}</a>{% endfor %}</div>
+{% for b in korningar %}<a href="{{ url_for('backtest_sida', kor=b.namn) }}" style="margin-left:10px;{{ 'font-weight:700;color:var(--text)' if b.namn == bt.namn }}">{{ b.etikett or (b.manader ~ ' mån') }}{{ ' (demo)' if b.demo }}</a>{% endfor %}</div>
 <div class="card" style="margin-bottom:16px;border-color:var(--varn-kant, #d9822b)">
 <b>Läs med försiktighet.</b>
 <ul class="small" style="margin:6px 0 0;padding-left:18px">
@@ -1450,7 +1477,8 @@ så alla strategier ser något bättre ut än de hade varit.</li>
 <pre class="small" style="white-space:pre-wrap;margin:0">cd ~/screener
 ./venv/bin/python backtest.py               # senaste 6 månaderna
 ./venv/bin/python backtest.py --manader 12  # senaste året
-./venv/bin/python backtest.py --manader 36  # senaste 3 åren (ca 10 minuter)</pre></div>
+./venv/bin/python backtest.py --manader 36  # senaste 3 åren (ca 10 minuter)
+./venv/bin/python backtest.py --insider     # Insider 30/60 sedan 2018 (insynsdatan)</pre></div>
 """
 
 
@@ -2127,6 +2155,8 @@ AKTIE_MALL = """
 <dt>Volatilitet (3 mån, årlig)</dt><dd>{{ m.volatilitet|pct(false) }}</dd>
 </dl></div>
 <div class="card"><h2>I screenern</h2>
+{% if s and s.insider_signal %}<div style="border:2px solid #d4a017;background:rgba(212,160,23,.12);border-radius:8px;padding:8px 10px;margin-bottom:10px">
+<b style="color:#d4a017">★ Insidersignal denna vecka</b><div class="small muted">Insiders har köpt netto och nästa rapport är 31–60 dagar bort – samma regel som Insider 30 (under validering).</div></div>{% endif %}
 {% if s %}<dl class="nyckel">
 <dt>Klarar filtren</dt><dd>{{ 'ja' if s.godkand else 'nej' }}</dd>
 {% if s.godkand %}<dt>Plats</dt><dd>{{ s.plats|tal(0) }} av {{ n_godk }}</dd><dt>Poäng</dt><dd>{{ s.poang|tal(0) }}</dd>

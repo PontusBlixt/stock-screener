@@ -41,6 +41,7 @@ import random
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -61,10 +62,19 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 RAPPORTER_INTERVALL_DAGAR = 6              # rapportdatum ändras sällan – hämta en gång i veckan
 
 
-def _hamta(url: str, timeout: int = 60) -> bytes:
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as svar:
-        return svar.read()
+def _hamta(url: str, timeout: int = 60, forsok: int = 4) -> bytes:
+    """Hämtar en adress. Stänger servern anslutningen (för många frågor) väntas allt längre innan nytt försök."""
+    for i in range(forsok):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as svar:
+                return svar.read()
+        except (ConnectionError, TimeoutError, urllib.error.URLError, OSError) as e:
+            if i == forsok - 1:
+                raise
+            vanta = (20, 60, 180)[min(i, 2)] + random.uniform(0, 10)
+            print(f"  {type(e).__name__} – väntar {vanta:.0f} s och försöker igen", file=sys.stderr)
+            time.sleep(vanta)
 
 
 def _skriv_atomiskt(fil: Path, data: bytes) -> None:
@@ -93,10 +103,38 @@ def tolka_insyn(data: bytes) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(text), sep=";", dtype=str, keep_default_na=False)
 
 
+INSYN_TAK = 1000  # FI:s export ger högst så många rader per sökning
+
+
+def hamta_insyn_period(fran: dt.date, till: dt.date) -> pd.DataFrame:
+    """Hämtar affärer publicerade fran–till. Ger FI exakt taket delas perioden på mitten tills varje
+    del ryms, så att inga affärer klipps bort."""
+    df = tolka_insyn(_hamta(INSYN_URL.format(fran=fran.isoformat(), till=till.isoformat()), timeout=120))
+    if len(df) < INSYN_TAK:
+        return df
+    if fran == till:
+        print(f"  insyn {fran}: minst {INSYN_TAK} affärer på en dag – kan sakna några", file=sys.stderr)
+        return df
+    mitt = fran + (till - fran) // 2
+    time.sleep(random.uniform(3.0, 6.0))
+    a = hamta_insyn_period(fran, mitt)
+    time.sleep(random.uniform(3.0, 6.0))
+    b = hamta_insyn_period(mitt + dt.timedelta(days=1), till)
+    return pd.concat([a, b], ignore_index=True).drop_duplicates()
+
+
 def hamta_insyn_manad(manad: dt.date) -> pd.DataFrame:
     fran = manad.replace(day=1)
     till = (fran + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
-    return tolka_insyn(_hamta(INSYN_URL.format(fran=fran.isoformat(), till=till.isoformat()), timeout=120))
+    return hamta_insyn_period(fran, till)
+
+
+def _avklippt(fil: Path) -> bool:
+    """En äldre månadsfil med exakt taket hämtades innan uppdelningen fanns – hämta om."""
+    try:
+        return len(pd.read_csv(fil, dtype=str)) == INSYN_TAK
+    except Exception:
+        return True
 
 
 def insyn(utmapp: Path, historik: bool) -> str:
@@ -112,8 +150,8 @@ def insyn(utmapp: Path, historik: bool) -> str:
     for i, manad in enumerate(manader):
         fil = m / f"{manad:%Y-%m}.csv"
         aktuell = manad >= (idag.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
-        if fil.exists() and not aktuell:
-            continue  # avslutade månader hämtas bara en gång
+        if fil.exists() and not aktuell and not _avklippt(fil):
+            continue  # avslutade och kompletta månader hämtas bara en gång
         try:
             df = hamta_insyn_manad(manad)
             if len(df) == 0 and not aktuell:
@@ -125,7 +163,7 @@ def insyn(utmapp: Path, historik: bool) -> str:
             fel += 1
             print(f"  insyn {manad:%Y-%m}: FEL {type(e).__name__}: {e}", file=sys.stderr)
         if i < len(manader) - 1:
-            time.sleep(random.uniform(1.5, 3.0))
+            time.sleep(random.uniform(3.0, 6.0))
         if nya and nya % 12 == 0 and not aktuell:
             print(f"  insyn: {nya} månader hämtade ...", file=sys.stderr)
     return f"insyn: {nya} månadsfiler uppdaterade, {rader} affärer, {fel} fel"
