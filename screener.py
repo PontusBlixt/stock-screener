@@ -22,8 +22,7 @@ Körning:
   python3 screener.py                                   # vanlig körning
   python3 screener.py --utmapp ~/test                   # annan mapp för rapporterna
 
-Dina innehav läses från innehav.csv i 
-utmappen (se innehav.py) och får
+Dina innehav läses från innehav.csv i utmappen (se innehav.py) och får
 säljsignaler i rapporten.
   python3 screener.py --demo                            # testa utan internet (påhittad data)
 
@@ -359,6 +358,33 @@ KOLUMNER = [
 ]
 
 
+def _blankning_txt(pct, andring) -> str:
+    """'12,5 % ↑2,5' – total blankning och förändring på 30 dagar (bara om den är minst 0,5 pe)."""
+    if pct is None or pd.isna(pct) or pct <= 0:
+        return ""
+    t = f"{pct:.1f} %".replace(".", ",")
+    if andring is not None and pd.notna(andring) and abs(andring) >= 0.5:
+        t += f" {'↑' if andring > 0 else '↓'}{abs(andring):.1f}".replace(".", ",")
+    return t
+
+
+def _insider_txt(netto, kopare) -> str:
+    """'+1,2 M (3)' – nettoköp i miljoner kronor senaste 90 dagarna och antal köpare."""
+    if netto is None or pd.isna(netto) or abs(netto) < 1:
+        return ""
+    t = f"{netto / 1e6:+.1f} M".replace(".", ",")
+    if kopare and pd.notna(kopare) and kopare > 0:
+        t += f" ({int(kopare)})"
+    return t
+
+
+def info_kolumner(tabell: pd.DataFrame) -> list:
+    """Blankning och insiderhandel visas bara om signaler.berika() har körts. Påverkar inte poängen."""
+    if "blankning_pct" not in tabell.columns:
+        return []
+    return [("Blankning", "txt_blankning", str), ("Insider 90 d", "txt_insider", str)]
+
+
 def bortfall_per_orsak(tabell: pd.DataFrame) -> list[tuple[str, int]]:
     antal = {}
     for o in tabell.loc[~tabell["godkand"], "orsak"]:
@@ -380,7 +406,10 @@ def skriv_markdown(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute
              f"{KONFIG['urval_max_1m'] * 100:.0f} %, oms ≥ {KONFIG['urval_min_omsattning_sek'] / 1e6:.0f} MSEK, "
              f"volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %)",
              "",
-             tabell_md(topp, KOLUMNER)]
+             tabell_md(topp, KOLUMNER + info_kolumner(topp))]
+    if info_kolumner(topp):
+        delar += ["", "Blankning = total blankning (FI), ↑↓ förändring senaste 30 dagarna. Insider 90 d = nettoköp av "
+                      "personer i ledande ställning i miljoner kronor (antal köpare). Information – påverkar inte poängen."]
 
     ej_urval = topp[~topp["urval"]]
     if len(ej_urval):
@@ -423,6 +452,8 @@ def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, br
         klass = "pos" if x > 0 else "neg" if x < 0 else ""
         return f'<td class="num {klass}">{x * 100:+.1f}%</td>'
 
+    har_info = bool(info_kolumner(topp))
+    info_rubriker = ('<th class="num">Blankning</th><th class="num">Insider 90 d</th>' if har_info else "")
     rader = []
     for r in topp.itertuples():
         ny = ' <span class="tag">ny</span>' if nya and r.ticker in nya else ""
@@ -435,7 +466,11 @@ def skriv_html(fil: Path, idag: str, tabell, topp, saknade, analys, nya, ute, br
             f'{cell_pct(r.mom_12_1)}{cell_pct(r.mom_6m)}{cell_pct(r.mom_1m)}'
             f'{cell_pct(r.avstand_ma200)}{cell_pct(r.fran_52v_hogsta)}'
             f'<td class="num">{r.volatilitet * 100:.0f}%</td>'
-            f'<td class="num">{r.omsattning_sek / 1e6:.0f}</td></tr>'
+            f'<td class="num">{r.omsattning_sek / 1e6:.0f}</td>'
+            + (f'<td class="num" title="Total blankning enligt FI, förändring senaste 30 dagarna">{e(r.txt_blankning)}</td>'
+               f'<td class="num {"pos" if (r.insider_netto_sek or 0) > 0 else "neg" if (r.insider_netto_sek or 0) < 0 else ""}"'
+               f' title="Nettoköp av insiders senaste 90 dagarna (antal köpare)">{e(r.txt_insider)}</td>' if har_info else "")
+            + '</tr>'
         )
 
     ej_urval = topp[~topp["urval"]]
@@ -524,11 +559,12 @@ footer {{ margin-top:24px; font-size:12px; color:var(--muted) }}
 <thead><tr><th>#</th><th>Aktie</th><th class="num">Poäng</th><th class="mid">Urval</th>
 <th class="num">12-1 mån</th><th class="num">6 mån</th><th class="num">1 mån</th>
 <th class="num">Över MA200</th><th class="num">Från 52v-topp</th><th class="num">Volatilitet</th>
-<th class="num">Oms/dag MSEK</th></tr></thead>
+<th class="num">Oms/dag MSEK</th>{info_rubriker}</tr></thead>
 <tbody>{''.join(rader)}</tbody></table></div>
 <p class="muted small">Grön rad = klarar urvalsreglerna: 1 mån ≤ {KONFIG['urval_max_1m'] * 100:.0f} %,
 omsättning ≥ {KONFIG['urval_min_omsattning_sek'] / 1e6:.0f} MSEK/dag,
-volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %. Håll muspekaren över en rad för orsaken.</p>
+volatilitet ≤ {KONFIG['urval_max_volatilitet'] * 100:.0f} %. Håll muspekaren över en rad för orsaken.
+{"<br>Blankning = total blankning enligt FI (↑↓ förändring senaste 30 dagarna). Insider 90 d = nettoköp av personer i ledande ställning i miljoner kronor (antal köpare). Bara information – påverkar inte poängen." if har_info else ""}</p>
 {ej_urval_html}
 <div class="grid">{''.join(kort)}</div>
 <footer>Kandidater att granska vidare, inte köprekommendationer. Data: Yahoo Finance.</footer>
@@ -542,6 +578,9 @@ def skriv_rapporter(tabell, saknade, analys, utmapp: Path, demo: bool, utv_rader
     idag = dt.date.today().isoformat()
 
     topp = tabell[tabell["topp"]].copy()
+    if "blankning_pct" in topp.columns:
+        topp["txt_blankning"] = [_blankning_txt(p, a) for p, a in zip(topp["blankning_pct"], topp["blankning_andring_30d"])]
+        topp["txt_insider"] = [_insider_txt(n, k) for n, k in zip(topp["insider_netto_sek"], topp["insider_kopare"])]
 
     forra = forra_topplistan(utmapp, idag)
     nya = ute = None
@@ -642,6 +681,13 @@ def main() -> int:
     if KONFIG["ett_aktieslag_per_bolag"]:
         tabell = ett_aktieslag(tabell, innehav)
     tabell = filtrera_och_ranka(tabell)
+
+    # Insiderhandel och blankning som informationskolumner (påverkar inte rankning eller regler)
+    try:
+        import signaler
+        tabell = signaler.berika(tabell, utmapp, Path(a.tickers))
+    except Exception as fel:
+        print(f"Insyn/blankning kunde inte läggas till: {type(fel).__name__}: {fel}", file=sys.stderr)
 
     analys = ih.analysera(innehav_df, stangning, tabell)
     utv_rader = ih.utveckling_markdown(innehav_df, affarer_df, stangning)

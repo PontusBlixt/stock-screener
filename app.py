@@ -2007,6 +2007,63 @@ def _nyckeltal_vy(ticker: str) -> str:
     return render_template_string(NK_MALL, **kw)
 
 
+INSYN_MALL = """
+<div class="card" style="margin-top:12px"><h2>Insiderhandel och blankning</h2>
+{% if not d.har_data %}<p class="small muted" style="margin:0">Ingen data ännu – kör <code>insamling.py</code>.</p>{% else %}
+<div class="stats" style="margin:0 0 12px">
+<div class="stat"><span class="muted small">Blankning</span><b>{{ bl_txt }}</b>
+<span class="small muted">{{ bl_under }}</span></div>
+<div class="stat"><span class="muted small">Insiders 90 dagar</span><b class="{{ netto|klass }}">{{ netto_txt }}</b>
+<span class="small muted">{{ kopare }} köpare · {{ saljare }} säljare</span></div>
+</div>
+{% if affarer %}
+<div class="wrap"><table>
+<thead><tr><th>Datum</th><th>Person</th><th>Befattning</th><th>Affär</th><th class="num">Antal</th><th class="num">Pris</th><th class="num">Belopp</th></tr></thead>
+<tbody>{% for a in affarer %}<tr>
+<td class="small">{{ a.transaktionsdatum|datum }}</td><td><b>{{ a.person }}</b>{% if a.narstaende %} <span class="muted small">(närstående)</span>{% endif %}</td>
+<td class="small">{{ a.befattning }}</td>
+<td><span class="badge {{ 'behall' if a.kop else 'salj' }}">{{ 'KÖP' if a.kop else 'SÄLJ' }}</span></td>
+<td class="num">{{ a.volym|tal(0) }}</td><td class="num">{{ a.pris|tal }} <span class="muted small">{{ a.valuta }}</span></td>
+<td class="num">{{ a.belopp|kr }}</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<p class="small muted">Inga köp eller försäljningar av insiders senaste året.</p>{% endif %}
+<p class="small muted">Källa: Finansinspektionens insyns- och blankningsregister (offentliga). Insiders får inte handla
+30 dagar före en rapport. Affärer i aktieprogram räknas inte. <b>Information</b> – påverkar inte poängen eller reglerna.</p>
+{% endif %}</div>
+"""
+
+
+def insyn_kort(ticker: str) -> str:
+    """Rutan på aktiesidan. Ett fel här får aldrig fälla sidan."""
+    try:
+        import signaler as sg
+        d = sg.for_bolag(ticker, UTMAPP, sc.MAPP / "tickers_se.csv")
+        aff = d["affarer"]
+        rader, nittio = [], pd.Timestamp(dt.date.today() - dt.timedelta(days=90))
+        kop_n = salj_n = 0
+        netto = 0.0
+        for a in aff.to_dict("records") if len(aff) else []:
+            a["kop"] = str(a["karaktar"]).lower() in ("förvärv", "acquisition")
+            rader.append(a)
+            if a["transaktionsdatum"] >= nittio and pd.notna(a["belopp"]):
+                netto += a["belopp"] if a["kop"] else -a["belopp"]
+        senaste = [a for a in rader if a["transaktionsdatum"] >= nittio]
+        kop_n = len({a["person"] for a in senaste if a["kop"]})
+        salj_n = len({a["person"] for a in senaste if not a["kop"]})
+        bl = d["blankning"] or {}
+        pct = bl.get("blankning_pct")
+        andr = bl.get("blankning_andring_30d")
+        bl_txt = f"{pct:.2f} %".replace(".", ",") if pct else "under 0,1 %"
+        bl_under = (f"{andr:+.2f} pe senaste 30 dagarna".replace(".", ",") if andr is not None and pd.notna(andr)
+                    else "förändring visas när 30 dagars historik finns")
+        return render_template_string(INSYN_MALL, d=d, affarer=rader[:15], netto=netto if senaste else None,
+                                      netto_txt=(f"{netto / 1e6:+.2f} MSEK".replace(".", ",") if senaste else "inga affärer"),
+                                      kopare=kop_n, saljare=salj_n, bl_txt=bl_txt, bl_under=bl_under)
+    except Exception:
+        import traceback
+        app.logger.error("Insynsrutan för %s misslyckades:\n%s", ticker, traceback.format_exc())
+        return ""
+
+
 AKTIE_MALL = """
 <p class="small"><a href="{{ url_for('innehav_sida') }}">← Mina innehav</a> · <a href="{{ url_for('rapport') }}">Veckans rapport</a></p>
 <h1>{{ ticker|kort }} <span class="muted" style="font-weight:400">{{ namn }}</span></h1>
@@ -2016,6 +2073,12 @@ AKTIE_MALL = """
 <div class="vy" data-vy="nyckeltal" hidden>{{ nkvy|safe }}</div>
 <div class="vy" data-vy="oversikt">
 <div class="card">{{ graf|safe }}</div>
+{% if oms_graf %}<div class="card" style="margin-top:12px"><h2>Omsättning per dag</h2>
+{{ oms_graf|safe }}
+<p class="small muted" style="margin:6px 0 0">Miljoner kronor per dag. <span style="color:var(--accent)">▮</span> omsättning
+<span style="color:var(--orange)">▮</span> topp (över 3× snittet) <span style="color:var(--text);opacity:.7">━</span> snitt 20 dagar
+<span style="color:var(--muted)">┆</span> rapport · {{ oms_txt }}</p>
+<p class="small muted" style="margin:4px 0 0">En topp vid en rapport är väntad. En topp utan rapport eller nyhet kan vara värd att undersöka.</p></div>{% endif %}
 
 {% for a in poster %}
 <div class="grid">
@@ -2055,10 +2118,134 @@ AKTIE_MALL = """
 {% if s.godkand %}<dt>Plats</dt><dd>{{ s.plats|tal(0) }} av {{ n_godk }}</dd><dt>Poäng</dt><dd>{{ s.poang|tal(0) }}</dd>
 <dt>Urvalsregler</dt><dd>{{ '✓' if s.urval else s.urval_orsak }}</dd>{% else %}<dt>Orsak</dt><dd>{{ s.orsak }}</dd>{% endif %}
 <dt>Omsättning/dag</dt><dd>{{ (s.omsattning_sek / 1e6)|tal(0) }} MSEK</dd>
-</dl>{% else %}<p class="muted small">Ingår inte i den svenska screenern.</p>{% endif %}
+<dt>Nästa rapport</dt><dd class="{{ 'neg' if rapport_dagar is not none and rapport_dagar <= 14 else '' }}">{{ rapport_txt or '–' }}</dd>
+</dl>{% else %}<p class="muted small">Ingår inte i den svenska screenern.</p>
+{% if rapport_txt %}<dl class="nyckel"><dt>Nästa rapport</dt><dd>{{ rapport_txt }}</dd></dl>{% endif %}{% endif %}
 </div></div>
+{{ insynkort|safe }}
 </div></div>
 """
+
+
+# ---------------------------------------------------------------------------
+# Omsättning per dag och rapportdatum (aktiesidan)
+# ---------------------------------------------------------------------------
+_oms_cache: dict = {}
+
+
+def omsattning_serie(ticker: str) -> pd.Series | None:
+    """Omsättning i kronor per dag senaste året. Hämtas från Yahoo första gången per dag och sparas i minnet."""
+    nyckel = (ticker, dt.date.today())
+    if nyckel in _oms_cache:
+        return _oms_cache[nyckel]
+    serie = None
+    try:
+        data = sc.demodata([ticker], seed=len(ticker)) if DEMO else sc.hamta_kurser([ticker], "1y")
+        if ticker in data:
+            df = data[ticker]
+            serie = (df["Close"] * df["Volume"]).dropna()
+            valuta = ih.gissa_valuta(ticker)
+            fxt = ih.fx_ticker(valuta)
+            if fxt:  # utländsk aktie: räkna om till kronor med senaste växelkurs
+                k = kurser()
+                fx = float(k[fxt].dropna().iloc[-1]) if fxt in k.columns and k[fxt].notna().any() else np.nan
+                serie = serie * fx if pd.notna(fx) else serie
+    except Exception:
+        serie = None
+    if serie is None:  # reserv: omsättning från backtestets sparade data, om den finns
+        try:
+            m = UTMAPP / "backtest" / "data"
+            kk, vv = ih.las_kurser(m / "kurser.csv"), ih.las_kurser(m / "volym.csv")
+            if ticker in kk.columns and ticker in vv.columns:
+                serie = (kk[ticker] * vv[ticker]).dropna()
+                serie = serie[serie.index >= serie.index.max() - pd.Timedelta(days=365)]
+        except Exception:
+            serie = None
+    for gammal in [n for n in _oms_cache if n[1] != dt.date.today()]:
+        _oms_cache.pop(gammal, None)
+    _oms_cache[nyckel] = serie
+    return serie
+
+
+_rapport_cache: dict = {"mtime": None, "df": None}
+
+
+def rapportdatum(ticker: str) -> tuple[list[pd.Timestamp], pd.Timestamp | None]:
+    """(tidigare rapportdagar, nästa rapportdag) ur rapporter/historik.csv, med nyckeltalen som reserv.
+    Flera aktieslag i samma bolag delar rapportdatum."""
+    fil = UTMAPP / "rapporter" / "historik.csv"
+    tidigare, nasta = [], None
+    try:
+        if fil.exists():
+            m = fil.stat().st_mtime
+            if _rapport_cache["mtime"] != m:
+                d = pd.read_csv(fil, usecols=["ticker", "rapportdatum"])
+                d["rapportdatum"] = pd.to_datetime(d["rapportdatum"]).dt.normalize()
+                d["bolag"] = d["ticker"].map(sc.bolagsnyckel)
+                _rapport_cache.update(mtime=m, df=d)
+            d = _rapport_cache["df"]
+            datum = sorted(set(d.loc[d["bolag"] == sc.bolagsnyckel(ticker), "rapportdatum"]))
+            idag = pd.Timestamp.today().normalize()
+            tidigare = [x for x in datum if x < idag]
+            kommande = [x for x in datum if x >= idag]
+            nasta = kommande[0] if kommande else None
+    except Exception:
+        pass
+    if nasta is None:  # reserv: senaste nyckeltalsfilens nästa rapport
+        try:
+            _, senaste = nk_data()
+            if len(senaste) and ticker in set(senaste["ticker"]):
+                v = pd.to_datetime(senaste.loc[senaste["ticker"] == ticker, "nasta_rapport"].iloc[0], errors="coerce")
+                nasta = v.normalize() if pd.notna(v) and v >= pd.Timestamp.today().normalize() else None
+        except Exception:
+            pass
+    return tidigare, nasta
+
+
+def graf_omsattning(s: pd.Series, rapporter: list | None = None, B: int = 860) -> str:
+    """Staplar med omsättning per dag, linje för 20-dagarssnittet, färgade toppar (> 3× snittet)
+    och streckade linjer vid rapportdagar."""
+    s = s.dropna()
+    s = s[s.index >= s.index.max() - pd.Timedelta(days=365)]
+    if len(s) < 20:
+        return "<p class='muted small'>För lite omsättningsdata för en graf.</p>"
+    snitt = s.rolling(20, min_periods=10).mean()
+    topp = s > 3 * snitt.shift(1)
+    H, VM, HM, TM, BM = (170, 56, 16, 10, 24) if B >= 600 else (160, 44, 10, 10, 24)
+    hi = float(s.quantile(0.995)) * 1.1 or 1.0  # en extrem dag får inte trycka ihop resten
+    t0, t1 = s.index[0].value, s.index[-1].value
+    bredd = max(1.0, (B - VM - HM) / len(s) * 0.75)
+
+    def x(t):
+        return VM + (pd.Timestamp(t).value - t0) / (t1 - t0) * (B - VM - HM)
+
+    def y(v):
+        return TM + (1 - min(v, hi) / hi) * (H - TM - BM)
+
+    delar = []
+    for frac in (0.5, 1.0):
+        v = hi * frac
+        delar.append(f'<line x1="{VM}" x2="{B - HM}" y1="{y(v):.1f}" y2="{y(v):.1f}" stroke="var(--linje)"/>'
+                     f'<text x="{VM - 8}" y="{y(v) + 4:.1f}" text-anchor="end" font-size="11" fill="var(--muted)">'
+                     f'{v / 1e6:.0f} M</text>')
+    for r in rapporter or []:
+        if s.index[0] <= r <= s.index[-1]:
+            delar.append(f'<line x1="{x(r):.1f}" x2="{x(r):.1f}" y1="{TM}" y2="{H - BM}" stroke="var(--muted)" '
+                         f'stroke-dasharray="2 3"/>')
+    for t, v in s.items():
+        farg = "var(--orange)" if topp.get(t, False) else "var(--accent)"
+        delar.append(f'<rect x="{x(t) - bredd / 2:.1f}" y="{y(v):.1f}" width="{bredd:.1f}" height="{H - BM - y(v):.1f}" '
+                     f'fill="{farg}" opacity="{1 if farg != "var(--accent)" else 0.55}"/>')
+    p = [(x(t), y(v)) for t, v in snitt.dropna().items()]
+    if len(p) >= 2:
+        delar.append(f'<path d="M{" L".join(f"{a:.1f},{b:.1f}" for a, b in p)}" fill="none" stroke="var(--text)" '
+                     f'stroke-width="1.3" opacity="0.7"/>')
+    manader = pd.date_range(s.index[0], s.index[-1], freq="MS")
+    for t in manader[::max(1, math.ceil(len(manader) / (12 if B >= 600 else 5)))]:
+        delar.append(f'<text x="{x(t):.1f}" y="{H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">'
+                     f'{t.strftime("%b %y")}</text>')
+    return (f'<div class="grafwrap"><svg class="graf" viewBox="0 0 {B} {H}" role="img" aria-label="Omsättning per dag">'
+            f'{"".join(delar)}</svg></div>')
 
 
 @app.route("/aktie/<ticker>")
@@ -2089,9 +2276,28 @@ def aktie(ticker: str):
     forsta = poster[0] if poster else None
     graf = dubbel(graf_svg, s, forsta["kopdatum"] if forsta else None, forsta["kopkurs"] if forsta else None,
                     forsta["stopp"] if forsta and forsta["typ"] == "momentum" else None)
+
+    # Rapport och omsättning
+    tidigare_rapporter, nasta_rapport = rapportdatum(ticker)
+    rapport_txt = None
+    if nasta_rapport is not None:
+        dagar = (nasta_rapport - pd.Timestamp.today().normalize()).days
+        rapport_txt = (f"{nasta_rapport:%Y-%m-%d} ("
+                       + ("idag" if dagar == 0 else "imorgon" if dagar == 1 else f"om {dagar} dagar") + ")")
+    oms = omsattning_serie(ticker)
+    oms_graf = oms_txt = None
+    if oms is not None and len(oms) >= 20:
+        oms_graf = dubbel(graf_omsattning, oms, tidigare_rapporter)
+        snitt20 = float(oms.iloc[-21:-1].mean()) if len(oms) > 21 else float(oms.mean())
+        sista_oms = float(oms.iloc[-1])
+        topp_n = int((oms.iloc[-20:] > 3 * oms.rolling(20, min_periods=10).mean().shift(1).iloc[-20:]).sum())
+        oms_txt = (f"Senaste dagen {sista_oms / 1e6:.1f} MSEK, {sista_oms / snitt20:.1f}× snittet för 20 dagar "
+                   f"({snitt20 / 1e6:.1f} MSEK). {topp_n} dag{'ar' if topp_n != 1 else ''} med topp senaste månaden.")
     return sida(ticker, "innehav", AKTIE_MALL, ticker=ticker, namn=namn_for(ticker), sista=s.iloc[-1],
                 datum=s.index[-1].date(), graf=graf, poster=poster, m=m, s=srad, n_godk=n_godk,
-                nkvy=nyckeltal_vy(ticker))
+                nkvy=nyckeltal_vy(ticker), insynkort=insyn_kort(ticker), rapport_txt=rapport_txt,
+                rapport_dagar=(nasta_rapport - pd.Timestamp.today().normalize()).days if nasta_rapport is not None else None,
+                oms_graf=oms_graf, oms_txt=oms_txt)
 
 
 # ---------------------------------------------------------------------------

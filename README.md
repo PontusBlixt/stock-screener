@@ -77,6 +77,8 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `insyn/ÅÅÅÅ-MM.csv` | Insynsaffärer från FI:s insynsregister, en fil per månad – från `insamling.py` | **Aldrig** (historiken går att hämta om, men inte om FI tar bort den) |
 | `blankning/` | `senaste.csv` = dagens blankning per bolag, `andringar.csv` = alla förändringar sedan start (append) – går inte att återskapa | **Aldrig** |
 | `rapporter/` | `historik.csv` = senaste kända läget per rapport. `andringar.csv` = bara nya och ändrade rader, läggs till varje vecka. `2026-10-19.csv` = startläget från första hämtningen | **Aldrig** |
+| `koppling_lei.csv` | Koppling LEI-kod → bolag för blankningen, byggs om varje vecka av `signaler.py` | Ja – byggs om |
+| `analys/` | Resultat från `rapportanalys.py` | Ja – skapas om |
 | `backtest/` | Resultat från `backtest.py` (en mapp per period) och 5 års kurser i `backtest/data/` | Ja – skapas om vid nästa backtest |
 | `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
@@ -106,7 +108,7 @@ Kontrollera att `User` och sökvägarna i `screener-web.service` stämmer (filen
 
 - **Veckans rapport** – samma som `senaste.html`. Klicka på en ticker för att se dess graf.
 - **Mina innehav** – lägg till ett köp (ticker, typ, datum, kurs, antal) eller ta bort ett. Kurserna hämtas direkt när du lägger till, och knappen *Uppdatera kurser* hämtar dagens kurser. Rankningen uppdateras bara vid veckokörningen.
-- **Aktiesida** – två flikar. *Översikt*: kursgraf med MA50, MA200, köpkurs och stoppnivå, momentum och status för varje säljregel. *Nyckeltal*: värderings- och kvalitetspoäng mot sektorn, varje mått med sektormedian, analytikerdata, rapportdatum och ägande (se nedan). Adressen `…/aktie/VOLV-B.ST#nyckeltal` öppnar fliken direkt.
+- **Aktiesida** – två flikar. *Översikt*: kursgraf med MA50, MA200, köpkurs och stoppnivå; omsättning per dag senaste året (staplar, 20-dagarssnitt, toppar över 3× snittet färgade och rapportdagar som streckade linjer – en topp utan rapport kan vara värd att undersöka); momentum, status för varje säljregel, dagar till nästa rapport (röd inom 14 dagar) och insiderhandel och blankning. Omsättningen hämtas från Yahoo första gången aktien öppnas varje dag. *Nyckeltal*: värderings- och kvalitetspoäng mot sektorn, varje mått med sektormedian, analytikerdata, rapportdatum och ägande (se nedan). Adressen `…/aktie/VOLV-B.ST#nyckeltal` öppnar fliken direkt.
 - **Utveckling** – portföljens tidsviktade avkastning mot index (momentum, kärna eller hela portföljen, valfri period) och alla avslutade affärer med träffsäkerhet, snittvinst och snittförlust.
 - **Sök** – skriv en ticker eller ett bolagsnamn (t.ex. *volvo*, *VOLV-B.ST* eller *ADCT*). Sidan hämtar färska kurser från Yahoo och kör samma köpregler som screenern: omsättning, trendfilter, plats i rankningen och urvalsreglerna. Platsen räknas mot senaste veckorapportens godkända aktier, så den visar var aktien hade hamnat. Svaret är **KÖPLÄGE** (klarar allt och är topp 20), **BEVAKA** (godkänd men plats 21–40 eller bryter en urvalsregel) eller **INTE KÖPLÄGE**. Sidan visar också var den släpande stoppen skulle börja om du köper idag, och har samma Nyckeltal-flik som aktiesidan. Fungerar även för utländska aktier – omsättningen räknas om till kronor.
 - **Strategier** – låtsasportföljer som följer varje strategi exakt, utan riktiga pengar (se *Strategier* nedan). Graf och tabell jämför strategierna med varandra, med din egen momentumportfölj och med index. Klicka på en strategi för dess innehav, beslut och affärslogg.
@@ -225,7 +227,7 @@ De korrigerade värdena räknas fram från råsiffrorna varje gång historiken l
 
 ### Värderings- och kvalitetspoäng (under utvärdering)
 
-Visas i fliken Nyckeltal. **Poängen påverkar inte rankningen, köpreglerna eller säljreglerna** – `screener.py` och `innehav.py` läser aldrig nyckeltalen. Bara låtsasportföljerna B och C i `strategier.py` använder dem – aldrig veckorapporten eller dina egna säljsignaler. Under testperioden ska bara Översikt styra köp och försäljningar, så att utvärderingen av momentum blir ren.
+Visas i fliken Nyckeltal. **Poängen påverkar inte rankningen, köpreglerna eller säljreglerna** – `screener.py` och `innehav.py` läser aldrig nyckeltalen. (`screener.py` läser insyn och blankning, men bara för informationskolumnerna i rapporten.) Bara låtsasportföljerna B och C i `strategier.py` använder dem – aldrig veckorapporten eller dina egna säljsignaler. Under testperioden ska bara Översikt styra köp och försäljningar, så att utvärderingen av momentum blir ren.
 
 Definitionen är bestämd i förväg (funktionen `poang()` i `nyckeltal.py`), så att ett kommande backtest testar exakt detta:
 
@@ -326,7 +328,40 @@ cd ~/screener
 ./venv/bin/python insamling.py            # det cron kör varje vardag
 ```
 
+### Insiderhandel och blankning i rapporten
+
+`signaler.py` kopplar datan till våra aktier och visar den som två **informationskolumner** i veckorapporten. De påverkar inte poängen, rankningen eller reglerna:
+
+| Kolumn | Vad den visar |
+|---|---|
+| **Blankning** | Total blankning enligt FI, t.ex. `12,5 % ↑2,5` = 12,5 % av aktierna är blankade, upp 2,5 procentenheter på 30 dagar. Tom = under 0,1 % |
+| **Insider 90 d** | Nettoköp av personer i ledande ställning de senaste 90 dagarna i miljoner kronor, med antal köpare inom parentes, t.ex. `+1,2 M (3)` |
+
+Aktiesidan har dessutom rutan *Insiderhandel och blankning* med alla insideraffärer det senaste året.
+
+- **Kopplingen:** insynsaffärer kopplas via aktiens ISIN (finns i `tickers_se.csv` från `uppdatera_tickers.py`). Blankningen anges bara med bolagets LEI-kod. Kopplingen LEI → bolag lärs från insynsdatan och, för resten, på bolagsnamn.
+- **Bara riktiga köp och försäljningar räknas:** aktier, Förvärv/Avyttring, status Aktuell. Tilldelningar i aktieprogram och korrigerade anmälningar räknas inte.
+- Både insynsregistret och blankningsregistret är offentliga. Att använda dem som underlag för egna affärer är lagligt.
+
 Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andra. Hittar skriptet inte tabellen på FI:s sida står det i utskriften – då har FI ändrat sidan och `tolka_blankningstabell()` behöver justeras.
+
+## Rapportanalys: hur beter sig aktier runt sina rapporter?
+
+`rapportanalys.py` är en händelsestudie. För varje rapport de senaste fem åren mäts aktiens avkastning **mot marknaden** (snittet av alla aktier i listan, samma utdelningsjusterade kurser) i fönster runt rapportdagen. Den ändrar inga regler eller strategier – den visar vad som är värt att testa.
+
+```bash
+./venv/bin/python rapportanalys.py      # ett par minuter; hämtar 5 års kurser om backtest/data inte är från idag
+```
+
+| Fönster (dag 0 = rapportdagen) | Mäter |
+|---|---|
+| −20 → −1 | Uppgång inför rapporten |
+| −1 → +1 | Reaktionen på rapporten |
+| +1 → +60 | Driften efteråt |
+| +1 → 5 dagar före nästa rapport | "Köp efter bra rapport, sälj före nästa" |
+| Omsättning −5 → −1 mot normalt | Ovanlig omsättning före rapporten |
+
+Rapporterna delas i fem lika stora grupper efter EPS-överraskningen och efter kursreaktionen, och varje grupps drift visas – även år för år och efter kostnad (0,7 % per affär). Resultatet sparas i `analys/rapportanalys_DATUM.html` (öppna från Windows) och `.md`, och varje rapport med sina mått i `analys/rapporthandelser.csv`.
 
 ## Köra automatiskt varje vecka
 
