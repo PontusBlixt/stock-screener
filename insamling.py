@@ -9,12 +9,16 @@ Tre källor, sparade som råfiler i datamappen så att de kan analyseras senare:
                              försäljningar av personer i ledande ställning, en fil per publiceringsmånad.
                              Historik sedan juli 2016 hämtas med --historik, sedan uppdateras de två
                              senaste månaderna varje dag (korrigeringar kommer ibland i efterhand).
-  blankning/ÅÅÅÅ-MM-DD_*.xlsx  Blankningsregistret: FI:s Excelfiler med aktuella, historiska och
-                             aggregerade korta positioner. Aktuella och aggregerade sparas varje dag
-                             (de skrivs över av FI). Historiska hämtas en gång i veckan.
+  blankning/senaste.csv      Blankningsregistret: total blankning per bolag (över 0,1 %) som den står i
+                             tabellen på FI:s sida – dagens läge. FI visar bara aktuellt läge, så en dag
+                             som inte sparas är borta.
+  blankning/andringar.csv    Bara nya och ändrade positioner läggs till (append). Bolag som försvinner
+                             från listan loggas med summa 0.
   rapporter/historik.csv     Rapportdatum med analytikernas förväntade vinst per aktie, utfall och
-                             överraskning från Yahoo (yfinance get_earnings_dates). Uppdateras en gång
-                             i veckan. Varje hämtning sparas också som rapporter/ÅÅÅÅ-MM-DD.csv.
+                             överraskning från Yahoo (yfinance get_earnings_dates) – senaste kända läget
+                             för varje rapport. Uppdateras en gång i veckan.
+  rapporter/andringar.csv    Bara det som är nytt eller ändrat sedan förra hämtningen läggs till här
+                             (append). Visar t.ex. hur förväntningarna ändrades fram till rapportdagen.
 
 Inget av detta påverkar veckorapporten, säljreglerna eller strategierna – det är bara insamling.
 
@@ -100,7 +104,7 @@ def insyn(utmapp: Path, historik: bool) -> str:
     m.mkdir(parents=True, exist_ok=True)
     idag = dt.date.today()
     manader = []
-    d = INSYN_START if historik else (idag.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+    d = INSYN_START  # saknade månader (t.ex. efter ett tillfälligt fel) hämtas automatiskt
     while d <= idag:
         manader.append(d)
         d = (d + dt.timedelta(days=32)).replace(day=1)
@@ -122,7 +126,7 @@ def insyn(utmapp: Path, historik: bool) -> str:
             print(f"  insyn {manad:%Y-%m}: FEL {type(e).__name__}: {e}", file=sys.stderr)
         if i < len(manader) - 1:
             time.sleep(random.uniform(1.5, 3.0))
-        if historik and nya and nya % 12 == 0:
+        if nya and nya % 12 == 0 and not aktuell:
             print(f"  insyn: {nya} månader hämtade ...", file=sys.stderr)
     return f"insyn: {nya} månadsfiler uppdaterade, {rader} affärer, {fel} fel"
 
@@ -144,42 +148,96 @@ def blankningslankar(html: str) -> dict[str, str]:
     return ut
 
 
+LEI = re.compile(r"^[A-Z0-9]{18}[0-9]{2}$")
+BLANKNING_KOLUMNER = ["emittent", "lei", "positionsdatum", "summa_pct"]
+
+
+def _text(cell: str) -> str:
+    import html as h
+    return re.sub(r"\s+", " ", h.unescape(re.sub(r"<[^>]+>", " ", cell))).strip()
+
+
+def tolka_blankningstabell(html: str) -> pd.DataFrame:
+    """Tabellen "Aktuella positioner" på FI:s sida: emittent, LEI, datum för senaste position, summa blankning %."""
+    rader = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.S | re.I):
+        celler = [_text(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+        if len(celler) >= 4 and LEI.match(celler[1]):
+            pct = pd.to_numeric(celler[3].replace(",", ".").replace("%", "").strip(), errors="coerce")
+            rader.append([celler[0], celler[1], celler[2], pct])
+    return pd.DataFrame(rader, columns=BLANKNING_KOLUMNER)
+
+
 def blankning(utmapp: Path) -> str:
+    """Aggregerad blankning per bolag. senaste.csv = dagens läge, andringar.csv = bara nya/ändrade rader (append).
+    FI:s Excelfiler (per blankare) hämtas också om länkarna går att hitta."""
     m = utmapp / "blankning"
     m.mkdir(parents=True, exist_ok=True)
     idag = dt.date.today()
     html = _hamta(BLANKNING_SIDA).decode("utf-8", errors="replace")
+    ny = tolka_blankningstabell(html)
+    if ny.empty:
+        return "blankning: FEL – hittade ingen tabell med positioner på FI:s sida (sidan kan ha ändrats)"
+    ny.insert(0, "hamtad", idag.isoformat())
+    senaste_fil, andr_fil = m / "senaste.csv", m / "andringar.csv"
+    gammal = pd.read_csv(senaste_fil, dtype=str) if senaste_fil.exists() else pd.DataFrame(columns=["hamtad"] + BLANKNING_KOLUMNER)
+    nyckel = lambda d: set(zip(d["lei"], d["positionsdatum"].astype(str), pd.to_numeric(d["summa_pct"]).round(4)))
+    g = nyckel(gammal)
+    andrade = ny[[k not in g for k in zip(ny["lei"], ny["positionsdatum"], ny["summa_pct"].round(4))]]
+    # Bolag som försvunnit från listan (blankningen har gått under gränsen) loggas med summa 0
+    borta = gammal[~gammal["lei"].isin(set(ny["lei"]))].copy()
+    if len(borta):
+        borta = borta.assign(hamtad=idag.isoformat(), positionsdatum=idag.isoformat(), summa_pct=0.0)
+    logg = pd.concat([andrade, borta[ny.columns]], ignore_index=True) if len(borta) else andrade
+    if len(logg):
+        logg.to_csv(andr_fil, mode="a", header=not andr_fil.exists(), index=False)
+    _skriv_atomiskt(senaste_fil, ny.to_csv(index=False).encode("utf-8"))
+    ut = f"blankning: {len(ny)} bolag blankade, {len(andrade)} nya/ändrade, {len(borta)} borta"
+
+    # FI:s Excelfiler med positioner per blankare, om länkarna hittas (valfritt)
     lankar = blankningslankar(html)
-    if not lankar:
-        return "blankning: FEL – hittade inga Excellänkar på FI:s sida (sidan kan ha ändrats)"
-    ut = []
     for namn, url in lankar.items():
         if namn == "historiska" and idag.weekday() != 0 and any(m.glob("*_historiska.*")):
-            continue  # historiken hämtas på måndagar (och första gången)
+            continue
         try:
             data = _hamta(url, timeout=120)
-            typ = ".ods" if data[:2] == b"PK" and b"opendocument" in data[:200] else ".xlsx" if data[:2] == b"PK" else ".xls"
-            if data[:1] == b"<":
-                ut.append(f"{namn}: FEL – fick en webbsida i stället för en fil ({url})")
-                continue
-            _skriv_atomiskt(m / f"{idag}_{namn}{typ}", data)
-            ut.append(f"{namn} {len(data) // 1024} kB")
+            if data[:2] == b"PK":
+                _skriv_atomiskt(m / f"{idag}_{namn}.xlsx", data)
+                ut += f", {namn}.xlsx {len(data) // 1024} kB"
         except Exception as e:
-            ut.append(f"{namn}: FEL {type(e).__name__}: {e}")
-        time.sleep(1)
-    return "blankning: " + ", ".join(ut)
+            ut += f", {namn}.xlsx FEL {type(e).__name__}"
+    return ut
 
 
 # ---------------------------------------------------------------------------
 # RAPPORTDATUM OCH ÖVERRASKNINGAR (Yahoo)
 # ---------------------------------------------------------------------------
+RAPPORT_FALT = ["eps_forvantad", "eps_utfall", "overraskning_pct"]
+
+
+def _andrade(ny: pd.DataFrame, gammal: pd.DataFrame) -> pd.DataFrame:
+    """Rader i ny som inte finns i gammal, eller där förväntning/utfall/överraskning ändrats."""
+    if gammal.empty:
+        return ny
+    nyckel = ["ticker", "dag"]
+    j = ny.merge(gammal[nyckel + RAPPORT_FALT], on=nyckel, how="left", suffixes=("", "_g"), indicator=True)
+    ny_rad = j["_merge"] == "left_only"
+    andrad = pd.Series(False, index=j.index)
+    for f in RAPPORT_FALT:
+        a, b = pd.to_numeric(j[f], errors="coerce"), pd.to_numeric(j[f + "_g"], errors="coerce")
+        andrad |= ~((a.isna() & b.isna()) | ((a - b).abs() < 1e-9))
+    return ny[(ny_rad | andrad).values]
+
+
 def rapporter(utmapp: Path, historik: bool, tickerfil: Path) -> str:
     m = utmapp / "rapporter"
     m.mkdir(parents=True, exist_ok=True)
     idag = dt.date.today()
-    senaste = sorted(m.glob("????-??-??.csv"))
-    if senaste and not historik and (idag - dt.date.fromisoformat(senaste[-1].stem)).days < RAPPORTER_INTERVALL_DAGAR:
-        return f"rapporter: hämtade senast {senaste[-1].stem}, nästa om några dagar"
+    hist_fil, andr_fil = m / "historik.csv", m / "andringar.csv"
+    if hist_fil.exists() and not historik:
+        senast = dt.date.fromtimestamp(hist_fil.stat().st_mtime)
+        if (idag - senast).days < RAPPORTER_INTERVALL_DAGAR:
+            return f"rapporter: hämtade senast {senast}, nästa om {RAPPORTER_INTERVALL_DAGAR - (idag - senast).days} dagar"
     import yfinance as yf
     tickers = list(sc.las_tickers(tickerfil)["ticker"])
     rader, utan = [], 0
@@ -202,20 +260,28 @@ def rapporter(utmapp: Path, historik: bool, tickerfil: Path) -> str:
         time.sleep(random.uniform(0.6, 1.2))
         if i % 50 == 0:
             print(f"  rapporter {i}/{len(tickers)}", file=sys.stderr)
-    ny = pd.DataFrame(rader)
-    _skriv_atomiskt(m / f"{idag}.csv", ny.to_csv(index=False).encode("utf-8"))
-    # Sammanslagen historik: senaste hämtningen gäller för samma ticker och datum (utfall fylls i efter rapporten)
-    hist_fil = m / "historik.csv"
-    alla = pd.concat([pd.read_csv(hist_fil), ny], ignore_index=True) if hist_fil.exists() else ny
-    if len(alla):
-        alla["rapportdatum"] = pd.to_datetime(alla["rapportdatum"])
-        alla["dag"] = alla["rapportdatum"].dt.date
-        alla = alla.sort_values("hamtad").drop_duplicates(["ticker", "dag"], keep="last").drop(columns="dag")
-        alla = alla.sort_values(["ticker", "rapportdatum"])
-        _skriv_atomiskt(hist_fil, alla.to_csv(index=False).encode("utf-8"))
-    med = len(tickers) - utan
-    return (f"rapporter: {len(ny)} rapporter för {med} av {len(tickers)} aktier"
-            + (f", {len(alla)} i historiken" if len(alla) else ""))
+    ny = pd.DataFrame(rader, columns=["ticker", "rapportdatum"] + RAPPORT_FALT + ["hamtad"])
+    if ny.empty:
+        return f"rapporter: FEL – inga rapporter hämtades ({utan} aktier utan data)"
+    ny["rapportdatum"] = pd.to_datetime(ny["rapportdatum"])
+    ny["dag"] = ny["rapportdatum"].dt.date.astype(str)
+    gammal = pd.read_csv(hist_fil, dtype={"ticker": str}) if hist_fil.exists() else pd.DataFrame()
+    if len(gammal):
+        gammal["rapportdatum"] = pd.to_datetime(gammal["rapportdatum"])
+        gammal["dag"] = gammal["rapportdatum"].dt.date.astype(str)
+
+    # 1. Append: bara nya och ändrade rader
+    andrade = _andrade(ny, gammal).drop(columns="dag")
+    if len(andrade):
+        andrade.to_csv(andr_fil, mode="a", header=not andr_fil.exists(), index=False)
+
+    # 2. Senaste kända läget per rapport (skrivs om – liten fil)
+    alla = pd.concat([gammal, ny], ignore_index=True) if len(gammal) else ny
+    alla = alla.sort_values("hamtad").drop_duplicates(["ticker", "dag"], keep="last").drop(columns="dag")
+    alla = alla.sort_values(["ticker", "rapportdatum"])
+    _skriv_atomiskt(hist_fil, alla.to_csv(index=False).encode("utf-8"))
+    return (f"rapporter: {len(ny)} hämtade för {len(tickers) - utan} av {len(tickers)} aktier, "
+            f"{len(andrade)} nya eller ändrade, {len(alla)} i historiken")
 
 
 # ---------------------------------------------------------------------------

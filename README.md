@@ -75,8 +75,8 @@ Undermapparna skapas automatiskt första gången de behövs.
 | `backup/` | Säkerhetskopior från Avanza-importen. Bara de 10 senaste per fil behålls, äldre raderas automatiskt | Ja |
 | `strategier/<strategi>/` | Strategiernas låtsasportföljer: innehav, affärslogg och tillstånd | Nej – raderas den börjar strategin om från noll |
 | `insyn/ÅÅÅÅ-MM.csv` | Insynsaffärer från FI:s insynsregister, en fil per månad – från `insamling.py` | **Aldrig** (historiken går att hämta om, men inte om FI tar bort den) |
-| `blankning/` | FI:s Excelfiler med blankningspositioner, en per dag – går inte att återskapa | **Aldrig** |
-| `rapporter/` | Rapportdatum, förväntad och verklig vinst per aktie från Yahoo | **Aldrig** |
+| `blankning/` | `senaste.csv` = dagens blankning per bolag, `andringar.csv` = alla förändringar sedan start (append) – går inte att återskapa | **Aldrig** |
+| `rapporter/` | `historik.csv` = senaste kända läget per rapport. `andringar.csv` = bara nya och ändrade rader, läggs till varje vecka. `2026-10-19.csv` = startläget från första hämtningen | **Aldrig** |
 | `backtest/` | Resultat från `backtest.py` (en mapp per period) och 5 års kurser i `backtest/data/` | Ja – skapas om vid nästa backtest |
 | `strategier_demo/` | Påhittade strategiportföljer från `screener.py --demo` | Ja |
 | `nyckeltal_demo/` | Påhittad data från `nyckeltal.py --demo` | Ja |
@@ -314,10 +314,10 @@ Första körningen per dag hämtar 5 års kurser och omsättning för alla aktie
 | Källa | Vad | Hur ofta |
 |---|---|---|
 | Insynsregistret (Finansinspektionen) | Alla köp och försäljningar av personer i ledande ställning: vem, befattning, köp/sälj, antal, pris, datum | Historik sedan juli 2016 med `--historik`, sedan de två senaste månaderna varje dag |
-| Blankningsregistret (Finansinspektionen) | Korta positioner över 0,5 % per blankare, och aggregerade positioner över 0,1 % | Aktuella och aggregerade varje dag, historiska varje måndag |
-| Yahoo | Rapportdatum, analytikernas förväntade vinst per aktie, verklig vinst och överraskning i procent | En gång i veckan |
+| Blankningsregistret (Finansinspektionen) | Total blankning per bolag i procent och datum för senaste position, från tabellen på FI:s sida | Varje vardag. Bara nya och ändrade positioner läggs till i `andringar.csv` |
+| Yahoo | Rapportdatum, analytikernas förväntade vinst per aktie, verklig vinst och överraskning i procent | En gång i veckan. Bara det som är nytt eller ändrat läggs till i `andringar.csv`, så filerna växer långsamt |
 
-**Blankningen är den viktigaste att samla:** FI:s aktuella fil skrivs över varje dag, så en dag som inte sparas är borta. Insynsregistret har historik och kan hämtas om.
+**Blankningen är den viktigaste att samla:** FI visar bara dagens läge, så en dag som inte sparas är borta. Insynsregistret har historik och kan hämtas om – månader som saknas (t.ex. efter ett tillfälligt fel hos FI) hämtas automatiskt vid nästa körning.
 
 ```bash
 cd ~/screener
@@ -326,7 +326,7 @@ cd ~/screener
 ./venv/bin/python insamling.py            # det cron kör varje vardag
 ```
 
-Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andra. Hittar skriptet inte Excellänkarna på FI:s sida står det i utskriften – då har FI ändrat sidan och länksökningen i `blankningslankar()` behöver justeras.
+Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andra. Hittar skriptet inte tabellen på FI:s sida står det i utskriften – då har FI ändrat sidan och `tolka_blankningstabell()` behöver justeras.
 
 ## Köra automatiskt varje vecka
 
