@@ -42,6 +42,7 @@ import ikoner
 import innehav as ih
 import nyckeltal as nk
 import screener as sc
+import sprak as sp
 import strategier as st
 
 UTMAPP = Path(os.environ.get("SCREENER_UTMAPP", sc.KONFIG["utmapp"])).expanduser()
@@ -69,6 +70,44 @@ def kontrollera_losen():
     if auth and auth.password == LOSEN:
         return None
     return Response("Inloggning krävs", 401, {"WWW-Authenticate": 'Basic realm="Screener"'})
+
+
+# ---------------------------------------------------------------------------
+# Språk: svenska som standard, engelska via /sprak/en (se sprak.py)
+# ---------------------------------------------------------------------------
+def aktuellt_sprak() -> str:
+    try:
+        k = request.cookies.get("sprak", sp.STANDARD)
+    except RuntimeError:
+        return sp.STANDARD
+    return k if k in sp.SPRAK else sp.STANDARD
+
+
+@app.route("/sprak/<kod>")
+def byt_sprak(kod: str):
+    nasta = request.args.get("nasta", "/")
+    if not nasta.startswith("/") or nasta.startswith("//"):
+        nasta = "/"
+    svar = redirect(nasta)
+    if kod in sp.SPRAK:
+        svar.set_cookie("sprak", kod, max_age=365 * 24 * 3600, samesite="Lax")
+    return svar
+
+
+@app.after_request
+def oversatt_svar(svar: Response) -> Response:
+    sprak = aktuellt_sprak()
+    if sprak == sp.STANDARD or svar.direct_passthrough or svar.mimetype != "text/html" or svar.status_code >= 300:
+        return svar
+    try:
+        svar.set_data(sp.oversatt_html(svar.get_data(as_text=True), sprak))
+        if os.environ.get("SCREENER_SPRAK_LOGG") == "1" and sp.saknade:
+            with open(UTMAPP / ".saknade_oversattningar.txt", "a", encoding="utf-8") as f:
+                f.write("\n".join(sorted(sp.saknade)) + "\n")
+            sp.saknade.clear()
+    except Exception as fel:  # en översättning som felar får aldrig ta ner sidan – visa svenska
+        app.logger.warning("Översättning misslyckades: %s", fel)
+    return svar
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +284,16 @@ a.status.varn { background:var(--b-salj, #fde2e0); color:var(--neg, #c0352b) !im
 @media (prefers-color-scheme: dark) {
   a.status.ok { background:var(--b-behall, #1d3a27) } a.status.varn { background:var(--b-salj, #4a2422) } }
 a.status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor }
+a.sprakval { display:inline-flex; align-items:center; margin-left:8px; font-size:12px; font-weight:700; padding:3px 8px;
+  border:1px solid var(--linje, #d0d4da); border-radius:999px; color:var(--muted, #6b7280) !important; text-decoration:none }
+a.sprakval:hover { color:var(--text, #1c1f24) !important }
 nav.botten { display:none }
 @media (max-width: 720px) {
   body { font-size:15px; padding-bottom:calc(68px + env(safe-area-inset-bottom)) }
   nav.topp div { padding:12px 14px; padding-top:calc(12px + env(safe-area-inset-top)) }
   nav.topp a { display:none !important }
   nav.topp a.status { display:inline-flex !important }
+  nav.topp a.sprakval { display:inline-flex !important }
   main { padding:16px 12px 24px !important }
   h1 { font-size:21px !important }
   .stats { display:grid !important; grid-template-columns:1fr 1fr; gap:8px !important }
@@ -562,14 +605,20 @@ def status_rader() -> list[dict]:
 
 
 def status_knapp() -> str:
+    """Statusknappen och språkväljaren längst till höger i menyn."""
+    try:
+        vaxl = sp.vaxlare(aktuellt_sprak(), request.full_path.rstrip("?"))
+    except RuntimeError:
+        vaxl = ""
     try:
         rader = status_rader()
     except Exception:
-        return ""
+        return vaxl
     fel = [r for r in rader if not r["ok"]]
     if not fel:
-        return '<a class="status ok" href="/status" title="All insamling är i fas">Data</a>'
-    return f'<a class="status varn" href="/status" title="{html.escape(fel[0]["text"])}">{html.escape(fel[0]["namn"])}</a>'
+        return '<a class="status ok" href="/status" title="All insamling är i fas">Data</a>' + vaxl
+    return (f'<a class="status varn" href="/status" title="{html.escape(fel[0]["text"])}">{html.escape(fel[0]["namn"])}</a>'
+            + vaxl)
 
 
 STATUS_MALL = """
@@ -1093,7 +1142,9 @@ def ta_bort_affar(idx: int):
 # ---------------------------------------------------------------------------
 STRAT_FARG = {"momentum_v1": "var(--accent)", "b": "#e0812f", "c": "#2a9d6f", "kvalitet": "#8a63d2",
               "topp10": "#c9a227", "utan_urval": "#3fa7c9", "daglig_stopp": "#d4566a", "slump": "#9aa0a6", "manad": "#a1887f", "kvartal": "#00a88f",
-              "insider30": "#e8590c", "insider60": "#5c7cfa", "egen": "#b0489c"}
+              "insider30": "#e8590c", "insider60": "#5c7cfa", "insider30_index": "#d4a017",
+              "ml_insider30": "#e8590c", "ml_filter": "#d4a017", "ml_slump": "#9aa0a6",
+              "ix_insider30": "#e8590c", "ix_insider30_index": "#d4a017", "vp_insider30": "#e8590c", "vp_vinst20_direkt": "#2a9d6f", "vp_vinst20_sista": "#8a63d2", "egen": "#b0489c"}
 
 
 def graf_flera(serier: list[tuple[str, pd.Series, str, float]], B: int = 860) -> str:
@@ -1278,7 +1329,63 @@ STRATEGI_MALL = """
 <td class="num">{{ r.courtage|tal }}</td><td class="num {{ r.resultat|klass }}">{{ r.resultat|pct if r.resultat is not none else '' }}</td>
 <td class="small">{{ r.orsak }}</td></tr>{% endfor %}</tbody></table></div>
 {% else %}<div class="card muted">Inga affärer ännu.</div>{% endif %}
+{{ extra|safe }}
 """
+
+ML_MALL = """
+<h2 style="margin-top:26px">Modellens bedömningar</h2>
+<p class="small muted">Varje insidersignal under testperioden. Modellen bedömde den bara med det som var känt den veckan,
+och tränades aldrig på samma år. <b>För</b> och <b>emot</b> = de egenskaper som drog sannolikheten mest upp och ned
+(i procentenheter, jämfört med en typisk signal). <b>Utfall</b> = aktien mot marknaden till säljdagen, före kostnad.
+Godkänd om sannolikheten är minst gränsen (träningens median). En godkänd signal köps bara om det finns plats i portföljen.</p>
+{% for ar in ar_lista %}{% set g = per_ar[ar] %}
+<details {{ 'open' if loop.first }} style="margin:10px 0"><summary><b>{{ ar }}</b> · {{ g.n }} signaler, {{ g.godk }} godkända ·
+godkända {{ g.snitt_ok|pct }} mot underkända {{ g.snitt_nej|pct }} · rätt bedömt {{ g.ratt|pct(false) }}</summary>
+<div class="wrap" style="margin-top:8px"><table style="min-width:980px">
+<thead><tr><th>Vecka</th><th>Aktie</th><th>Beslut</th><th class="num">Modellen</th><th class="num">Gräns</th>
+<th style="min-width:220px">För</th><th style="min-width:220px">Emot</th><th class="num">Utfall</th><th class="mid">Rätt?</th></tr></thead><tbody>
+{% for r in g.rader %}<tr>
+<td class="small">{{ r.lordag }}</td>
+<td><a href="{{ url_for('aktie', ticker=r.ticker) }}"><b>{{ r.ticker|kort }}</b></a></td>
+<td><span class="badge {{ 'behall' if r.ok else 'info' }}">{{ 'GODKÄND' if r.ok else 'AVSTÅR' }}</span></td>
+<td class="num">{{ r.p|pct(false) }}</td><td class="num muted">{{ r.grans|pct(false) }}</td>
+<td class="small">{{ r.for_ }}</td><td class="small">{{ r.emot }}</td>
+<td class="num {{ r.facit|klass }}">{{ r.facit|pct if r.facit is not none else 'väntar' }}</td>
+<td class="mid">{{ ('✓' if r.ratt else '✗') if r.ratt is not none else '' }}</td></tr>{% endfor %}
+</tbody></table></div></details>{% endfor %}
+"""
+
+
+def ml_bedomningar(bas: Path) -> str:
+    """Tabellen med modellens bedömning av varje signal (från analys/insiderml_signaler.csv)."""
+    fil = bas.parent.parent / "analys" / "insiderml_signaler.csv"
+    if not fil.exists():
+        return ""
+    try:
+        df = pd.read_csv(fil)
+    except Exception:
+        return ""
+    df = df[df["ok_gb"].notna()].copy()
+    if df.empty:
+        return ""
+    kostnad = 0.007
+    per_ar = {}
+    for ar, g in df.sort_values("lordag", ascending=False).groupby("ar", sort=False):
+        rader = []
+        for r in g.to_dict("records"):
+            f = r.get("facit")
+            f = None if pd.isna(f) else float(f)
+            ok = r["ok_gb"] == 1
+            rader.append({"lordag": str(r["lordag"])[:10], "ticker": r["ticker"], "ok": ok, "p": r["p_gb"],
+                          "grans": r.get("grans"), "for_": r.get("for") if isinstance(r.get("for"), str) else "",
+                          "emot": r.get("emot") if isinstance(r.get("emot"), str) else "", "facit": f,
+                          "ratt": None if f is None else (ok == (f > kostnad))})
+        med = [x for x in rader if x["ratt"] is not None]
+        per_ar[int(ar)] = {"n": len(g), "godk": int((g["ok_gb"] == 1).sum()), "rader": rader,
+                           "snitt_ok": g.loc[g["ok_gb"] == 1, "facit"].mean(),
+                           "snitt_nej": g.loc[g["ok_gb"] == 0, "facit"].mean(),
+                           "ratt": sum(x["ratt"] for x in med) / len(med) if med else None}
+    return render_template_string(ML_MALL, per_ar=per_ar, ar_lista=sorted(per_ar, reverse=True))
 
 
 def _vantar_text(sid: str) -> str:
@@ -1342,7 +1449,8 @@ def strategi_sida(sid: str):
     return _strategi_vy(UTMAPP, kurser(), sid, tab, nyck, demo)
 
 
-def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = False, bt: dict | None = None) -> str:
+def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = False, bt: dict | None = None,
+                 extra: str = "") -> str:
     S = st.inst(sid)
     m = st.mapp(bas, sid, demo)
     t = st.las_tillstand(m)
@@ -1380,7 +1488,7 @@ def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = F
     # Resultat per försäljning (inklusive kostnader), matchat mot avslutade affärer i samma ordning
     res = list(avsl["saljkurs"] / avsl["kopkurs"] - 1)
     rader = []
-    for r in logg.to_dict("records"):
+    for r in logg[logg["handling"] != "INDEX"].to_dict("records") if len(logg) else []:
         r["resultat"] = res.pop(0) if r["handling"] == "SÄLJ" and res else None
         rader.append(r)
     kostnad = float(logg["courtage"].sum() + (logg["brutto"] * st.SPREAD / (1 + st.SPREAD)).sum()) if len(logg) else 0.0
@@ -1388,7 +1496,7 @@ def _strategi_vy(bas: Path, k: pd.DataFrame, sid: str, tab, nyck, demo: bool = F
                 varde=float(v["varde"].iloc[-1]) if len(v) else t["kassa"], avk=avk, index_avk=index_avk,
                 mot_index=avk - index_avk if index_avk is not None else None, indexnamn=indexnamn,
                 analys=analys, max=S["max_innehav"], stat=ih.affarsstatistik(avsl), graf=graf,
-                logg=list(reversed(rader)), kostnad=kostnad)
+                logg=list(reversed(rader)), kostnad=kostnad, extra=extra)
 
 
 _kal_cache: dict = {}
@@ -1521,13 +1629,14 @@ def backtest_sida(kor: str | None = None):
 @app.route("/backtest/<kor>/<sid>")
 def backtest_strategi(kor: str, sid: str):
     korningar = {b["namn"]: b for b in backtest_korningar()}
-    if kor not in korningar or sid not in st.STRATEGIER:
+    if kor not in korningar or (sid not in st.STRATEGIER and sid not in st.VISNING):
         abort(404)
     bas = BACKTEST_MAPP / kor
     if st.las_tillstand(st.mapp(bas, sid)) is None:
         abort(404)
     tab = ih.senaste_screener(bas)
-    return _strategi_vy(bas, bt_kurser(kor), sid, tab, None, bt=korningar[kor])
+    extra = ml_bedomningar(bas) if sid == "ml_filter" else ""
+    return _strategi_vy(bas, bt_kurser(kor), sid, tab, None, bt=korningar[kor], extra=extra)
 
 
 IMPORT_MALL = """

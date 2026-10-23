@@ -89,7 +89,14 @@ STANDARD = {
                              # eller "kvartal" (första lördagen i januari, april, juli, oktober)
     "kalla": "screener",     # var köpen kommer ifrån: "screener" (veckorapporten) eller "insider" (insynsköp)
     "salj_efter_rapport": None,  # insider: sälj vid första veckokörningen minst så här många dagar efter rapporten
+    "vinst_fore_rapport": None,  # insider: sälj FÖRE rapporten om aktien stigit minst så mycket sedan köpet (t.ex. 0.20)
+    "vinst_lage": "direkt",      # "direkt" = vid första veckokörningen med vinsten, "sista" = bara sista körningen före rapport
+    "kassa_i_index": False,      # insider: oinvesterad kassa ligger i en indexfond (se INDEXFOND_*) i stället för kontant
 }
+# Indexfond för kassan (kassa_i_index): OMX Stockholm PI (prisindex) + utdelningar − fondavgift, per år.
+# Ungefär som Avanza Sweden eller Länsförsäkringar Sverige Index. Köp och sälj av fonden kostar inget courtage.
+INDEXFOND_UTDELNING = 0.03
+INDEXFOND_AVGIFT = 0.002
 STRATEGIER = {
     "momentum_v1": {"namn": "Momentum v1", "kort": "Veckorapporten som den är"},
     "b": {"namn": "B: utan dyraste 20 %", "kort": "Momentum, men hoppar över de 20 % dyraste i varje sektor",
@@ -118,6 +125,38 @@ STRATEGIER = {
     "insider60": {"namn": "Insider 60", "kalla": "insider", "salj_efter_rapport": 60, "stopp": None, "salj_rank": None,
                   "krav_urval": False,
                   "kort": "Köper efter insiderköp 31–60 dagar före rapport, säljer 60 dagar efter rapporten"},
+    # Indexprovet 2026-10-23 klarade 3 av 3 krav: +224,8 % mot indexfonden +144,8 % och Insider 30 +164,4 % (2018–2026)
+    "insider30_index": {"namn": "Insider 30 + index", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                        "salj_rank": None, "krav_urval": False, "kassa_i_index": True,
+                        "kort": "Som Insider 30, men pengar som inte används ligger i en indexfond (OMXSPI + utdelning − avgift)"},
+}
+# Strategier som bara finns i backtest (insiderml.py) – visas på webbsidan men handlar aldrig framåt
+VISNING = {
+    "ml_insider30": {"namn": "Insider 30 (alla signaler)", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                     "salj_rank": None, "krav_urval": False, "kort": "Jämförelse: Insider 30 under samma testperiod som modellen"},
+    "ml_filter": {"namn": "Insider ML (bara godkända)", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                  "salj_rank": None, "krav_urval": False,
+                  "kort": "Insider 30, men köper bara signaler som modellen godkänner (walk-forward, aldrig tränad på teståret)"},
+    "ml_slump": {"namn": "Slumpfilter (samma andel)", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                 "salj_rank": None, "krav_urval": False,
+                 "kort": "Kontroll: Insider 30 där lika stor andel signaler hoppas över slumpvis"},
+    # indexprov.py
+    "ix_insider30": {"namn": "Insider 30 (kassa kontant)", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                     "salj_rank": None, "krav_urval": False, "kort": "Jämförelse: Insider 30 som den är, oinvesterad kassa kontant"},
+    "ix_insider30_index": {"namn": "Insider 30 + index", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                           "salj_rank": None, "krav_urval": False, "kassa_i_index": True,
+                           "kort": "Insider 30, men pengar som inte används ligger i en indexfond (OMXSPI + utdelning − avgift)"},
+    # variantprov.py
+    "vp_insider30": {"namn": "Insider 30 (som strategin)", "kalla": "insider", "salj_efter_rapport": 30, "stopp": None,
+                     "salj_rank": None, "krav_urval": False, "kort": "Jämförelse: Insider 30 under samma period"},
+    "vp_vinst20_direkt": {"namn": "Sälj direkt vid +20 % före rapport", "kalla": "insider", "salj_efter_rapport": 30,
+                          "stopp": None, "salj_rank": None, "krav_urval": False, "vinst_fore_rapport": 0.20,
+                          "vinst_lage": "direkt",
+                          "kort": "Som Insider 30, men säljer före rapporten så fort aktien stigit 20 % sedan köpet"},
+    "vp_vinst20_sista": {"namn": "Sälj sista veckan före rapport om +20 %", "kalla": "insider", "salj_efter_rapport": 30,
+                         "stopp": None, "salj_rank": None, "krav_urval": False, "vinst_fore_rapport": 0.20,
+                         "vinst_lage": "sista",
+                         "kort": "Som Insider 30, men säljer vid sista veckokörningen före rapporten om aktien då ligger 20 % upp"},
 }
 INSIDER_RESERV_DAGAR = 120   # hittas ingen rapport efter köpet: sälj så här många dagar efter köpet + salj_efter_rapport
 
@@ -129,7 +168,7 @@ def _kvartal(datum: str) -> str:
 
 def inst(sid: str) -> dict:
     """Strategins inställningar inklusive standardvärden."""
-    return {**STANDARD, **STRATEGIER[sid]}
+    return {**STANDARD, **(STRATEGIER[sid] if sid in STRATEGIER else VISNING[sid])}
 
 LOGG_KOLUMNER = ["datum", "rapport", "handling", "ticker", "antal", "kurs", "brutto", "courtage", "utdelning",
                  "kassaflode", "kassa_efter", "plats", "bas", "orsak"]
@@ -452,6 +491,27 @@ def kor_strategi(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame | No
                   ("kvartalsgenomgång" if S["rytm"] == "kvartal" else "månadsgenomgång") if manadsgenomgang else "")
 
 
+def indexfond(kurser: pd.DataFrame) -> pd.Series | None:
+    """Indexfondens kurs: OMX Stockholm PI med utdelningar och avgift inräknade dag för dag."""
+    if ih.JAMFORELSEINDEX not in kurser.columns:
+        return None
+    s = kurser[ih.JAMFORELSEINDEX].dropna()
+    if s.empty:
+        return None
+    ar = (s.index - pd.Timestamp("2000-01-01")).days / 365.25
+    return s * ((1 + INDEXFOND_UTDELNING) * (1 - INDEXFOND_AVGIFT)) ** ar
+
+
+def indexfond_tillvaxt(kurser: pd.DataFrame, fran: pd.Timestamp, till: pd.Timestamp) -> float | None:
+    f = indexfond(kurser)
+    if f is None:
+        return None
+    a, b = f[f.index <= fran], f[f.index <= till]
+    if not len(a) or not len(b) or a.iloc[-1] <= 0:
+        return None
+    return float(b.iloc[-1] / a.iloc[-1])
+
+
 def ar_insider(sid: str) -> bool:
     return inst(sid)["kalla"] == "insider"
 
@@ -480,7 +540,7 @@ def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurs
         return f"{sid}: {rapport} redan körd"
     if t is None:
         t = {"startkapital": STARTKAPITAL, "kassa": STARTKAPITAL, "start": rapport, "senaste_rapport": "",
-             "senaste_manad": rapport[:7], "senaste_kvartal": _kvartal(rapport), "namn": STRATEGIER[sid]["namn"]}
+             "senaste_manad": rapport[:7], "senaste_kvartal": _kvartal(rapport), "namn": S["namn"]}
     k = kurser[kurser.index <= pd.Timestamp(rdatum)]
     inn = ih.las_innehav(m / "innehav.csv")
     bas_tickers = list(tabell["ticker"]) + list(inn["ticker"])
@@ -497,11 +557,29 @@ def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurs
                          "antal": antal, "kurs": kurs, "brutto": brutto, "courtage": ct, "utdelning": utd,
                          "kassaflode": flode, "kassa_efter": kassa, "plats": np.nan, "bas": bas, "orsak": orsak})
 
+    # 0. Kassan i indexfond: kassan växer med fonden sedan förra veckokörningen (loggas som INDEX)
+    if S.get("kassa_i_index") and t.get("senaste_handelsdag") and kassa > 0:
+        g = indexfond_tillvaxt(k, pd.Timestamp(t["senaste_handelsdag"]), handelsdag)
+        if g is not None and abs(g - 1) > 1e-12:
+            flode = kassa * (g - 1)
+            kassa += flode
+            logga("INDEX", ih.JAMFORELSEINDEX, 0, g, 0.0, 0.0, flode, f"kassan i indexfond {(g - 1) * 100:+.2f} %")
+
     # 1. Försäljning när tiden gått ut
     for i, h in inn.iterrows():
         saljdag, rap = insider_saljdag(sid, h["ticker"], h["kopdatum"], kalender)
+        vinstsalj = None
         if pd.Timestamp(rdatum) < saljdag:
-            continue
+            # Variant: sälj före rapporten om aktien redan stigit tillräckligt (vinst_fore_rapport)
+            g = S.get("vinst_fore_rapport")
+            if g is None or rap is None or pd.Timestamp(rdatum) >= rap:
+                continue
+            if S.get("vinst_lage") == "sista" and (rap - pd.Timestamp(rdatum)).days > 7:
+                continue
+            v = aktievarde(k, logg, h["ticker"])
+            if v is None or v / h["kopkurs"] - 1 < g:
+                continue
+            vinstsalj = v / h["kopkurs"] - 1
         stang = _kurs(k, h["ticker"])
         if stang is None:
             continue
@@ -513,7 +591,8 @@ def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurs
         ct = courtage(brutto)
         netto = varde - ct
         kassa += netto
-        orsak = (f"{S['salj_efter_rapport']} dagar efter rapporten {rap:%Y-%m-%d}" if rap is not None
+        orsak = (f"före rapporten {rap:%Y-%m-%d}: upp {vinstsalj * 100:.0f} % sedan köpet" if vinstsalj is not None
+                 else f"{S['salj_efter_rapport']} dagar efter rapporten {rap:%Y-%m-%d}" if rap is not None
                  else f"ingen rapport hittad – {INSIDER_RESERV_DAGAR + S['salj_efter_rapport']} dagar efter köpet")
         if utd > 0.5:
             orsak += f" (inkl. utdelning {utd:,.0f} kr)".replace(",", " ")
@@ -526,7 +605,7 @@ def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurs
     inn = inn[inn["antal"] > 1e-9].reset_index(drop=True)
 
     # 2. Köp
-    salda = {r["ticker"] for r in nya_logg}
+    salda = {r["ticker"] for r in nya_logg if r["handling"] == "SÄLJ"}
     agda = {_bolag(x) for x in inn["ticker"]}
     kand = kandidater[~kandidater["bolag"].isin(agda) & ~kandidater["ticker"].isin(salda)] if len(kandidater) else kandidater
     lediga = S["max_innehav"] - len(inn)
@@ -545,9 +624,12 @@ def kor_insider(sid: str, utmapp: Path, rapport: str, tabell: pd.DataFrame, kurs
             break
         ct = courtage(brutto)
         kassa -= brutto + ct
-        andel = f", {r.andel * 100:.3f} % av börsvärdet" if pd.notna(r.andel) else ""
+        andel = (f", {r.dagar_oms:.2f} dagars omsättning" if pd.notna(getattr(r, "dagar_oms", np.nan))
+                 else f", {r.andel * 100:.3f} % av börsvärdet" if pd.notna(r.andel) else "")
         orsak = (f"insiderköp netto {r.netto_sek / 1e6:.1f} MSEK ({r.kopare} köpare{andel}), "
                  f"rapport {pd.Timestamp(r.nasta_rapport):%Y-%m-%d} om {r.dagar_till_rapport} dagar")
+        if isinstance(getattr(r, "ml_orsak", None), str) and r.ml_orsak:
+            orsak += " · " + r.ml_orsak
         nya_rader.append({"ticker": r.ticker, "typ": "momentum", "kopdatum": handelsdag,
                           "kopkurs": (brutto + ct) / antal, "antal": antal, "valuta": "SEK",
                           "notering": f"rapport {pd.Timestamp(r.nasta_rapport):%Y-%m-%d}"})
@@ -574,7 +656,7 @@ def _spara(sid, m, t, inn, avsl, logg, nya_avsl, nya_logg, kassa, handelsdag, up
     t.update(kassa=kassa, **upd)
     skriv_tillstand(m, t)
     kop = sum(1 for r in nya_logg if r["handling"] == "KÖP")
-    sal = len(nya_logg) - kop
+    sal = sum(1 for r in nya_logg if r["handling"] == "SÄLJ")
     return (f"{sid}: {kop} köp, {sal} försäljningar{f' ({extra})' if extra else ''}, "
             f"{len(inn)} innehav, kassa {kassa:,.0f} kr".replace(",", " "))
 
@@ -591,6 +673,14 @@ def kor_alla(utmapp: Path, demo: bool = False, rapportfil: Path | None = None) -
     filer = [rapportfil] if rapportfil else sorted(utmapp.glob("screener_????-??-??.csv"))
     if not filer:
         return ["Ingen veckorapport hittades – kör screener.py först."]
+    if not rapportfil:
+        # Strategierna handlar en gång i veckan: finns flera rapporter samma vecka (en extra körning mitt i
+        # veckan) används bara den sista. Då blir en manuell tisdagskörning aldrig en extra affärsdag.
+        per_vecka = {}
+        for f in filer:
+            d = dt.date.fromisoformat(f.stem.removeprefix("screener_"))
+            per_vecka[d.isocalendar()[:2]] = f
+        filer = sorted(per_vecka.values())
     kurser = ih.las_kurser(utmapp / "kurser.csv")
     ut = []
     insiderdata = {}
@@ -603,7 +693,7 @@ def kor_alla(utmapp: Path, demo: bool = False, rapportfil: Path | None = None) -
             tickerfil = Path(__file__).resolve().parent / "tickers_se.csv"
             insiderdata.update(aff=sg.insider_affarer(utmapp, tickerfil), kal=sg.rapportkalender(utmapp),
                                bv=sg.borsvarden(utmapp))
-        lik = tabell[tabell["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]][["ticker", "bolag"]]
+        lik = tabell[tabell["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]][["ticker", "bolag", "omsattning_sek"]]
         kand = sg.insider_kandidater(insiderdata["aff"], insiderdata["kal"], pd.Timestamp(rapport), lik,
                                      insiderdata["bv"], kurser)
         return kand, insiderdata["kal"]
@@ -711,9 +801,11 @@ def vardeserie(utmapp: Path, sid: str, kurser: pd.DataFrame, demo: bool = False)
 
 def oversikt(utmapp: Path, kurser: pd.DataFrame, demo: bool = False) -> list[dict]:
     ut = []
-    for sid, s in STRATEGIER.items():
+    for sid in {**STRATEGIER, **VISNING}:
         m = mapp(utmapp, sid, demo)
         t = las_tillstand(m)
+        if sid in VISNING and t is None:   # backtest-strategierna visas bara där de finns
+            continue
         rad = {"id": sid, **inst(sid), "startad": t is not None, "tillstand": t or {}}
         if t:
             v = vardeserie(utmapp, sid, kurser, demo)
@@ -723,7 +815,8 @@ def oversikt(utmapp: Path, kurser: pd.DataFrame, demo: bool = False) -> list[dic
             rad.update(serie=v, varde=float(v["varde"].iloc[-1]) if len(v) else t["kassa"],
                        avkastning=float(v["avkastning"].iloc[-1]) if len(v) else 0.0,
                        kassa=float(t["kassa"]), antal=len(inn), stat=ih.affarsstatistik(avsl),
-                       courtage=float(logg["courtage"].sum()) if len(logg) else 0.0, affarer=len(logg))
+                       courtage=float(logg["courtage"].sum()) if len(logg) else 0.0,
+                       affarer=int(logg["handling"].isin(["KÖP", "SÄLJ"]).sum()) if len(logg) else 0)
         ut.append(rad)
     return ut
 

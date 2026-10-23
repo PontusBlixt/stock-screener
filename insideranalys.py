@@ -15,7 +15,7 @@ Allt räknas på PUBLICERINGSDAGEN, inte affärsdagen – du kan bara agera när
          insiders efter nedgångar?).
 
 Händelserna delas upp efter det som var känt när veckan var slut (4 veckor bakåt):
-  - storlek: nettoköp i procent av börsvärdet (stora ägare som köper för miljarder blir små i procent)
+  - storlek: nettoköpet i dagars omsättning (nettoköp / snittomsättning per dag före köpet)
   - antal olika köpare
   - vem som köpte: vd/ekonomichef, styrelse, övriga
   - om köparen är en närstående (ofta ett bolag – storägare) eller personen själv
@@ -37,7 +37,8 @@ Resultat
 
 OBS
   - Överlevnadsfel: bara bolag som är noterade idag ingår.
-  - Börsvärdet bakåt i tiden uppskattas som dagens börsvärde × kursutvecklingen (nyemissioner syns inte).
+  - Storleken mäts mot omsättningen före köpet, inte börsvärdet: börsvärdet bakåt måste räknas med dagens kurs
+    och skulle läcka framtida kursutveckling (rättat 2026-10-20).
   - Händelser samma vecka rör sig delvis tillsammans, så t-värdena överskattar säkerheten något.
   - Inget här påverkar rapporten, strategierna eller reglerna.
 
@@ -69,7 +70,7 @@ VECKOR_BAKAT = 4          # fönster för storlek och antal köpare
 SPARR_VECKOR = 4          # ny köphändelse i samma bolag tidigast efter så här många veckor
 KLUSTER_KOPARE = 3
 KURS_MAX_ALDER = 30       # dagar – en analys över 10 år behöver inte färska kurser
-MAX_ANDEL = 0.5           # nettoköp över halva börsvärdet på 4 veckor = fel i anmälan
+MAX_ANDEL = 2000          # nettoköp över 2000 dagars omsättning (~8 år) på 4 veckor = fel i anmälan
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +189,9 @@ def veckor(affarer: pd.DataFrame) -> pd.DataFrame:
 
 
 def handelser(v: pd.DataFrame, kurser: pd.DataFrame, bolag_ticker: dict, borsvarde: dict,
-              rapporter: dict) -> pd.DataFrame:
+              rapporter: dict, volym: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Storleken ('andel') = nettoköpet i dagars omsättning: nettoköp / snittomsättning per dag de 20 handelsdagarna
+    före köpet. Bara det som var känt då – börsvärdet bakåt (dagens × kursutvecklingen) skulle läcka framtida kurs."""
     kurser = kurser[~kurser.index.duplicated()].sort_index()
     m = ra.marknad(kurser).to_numpy()
     dagar = kurser.index
@@ -198,8 +201,7 @@ def handelser(v: pd.DataFrame, kurser: pd.DataFrame, bolag_ticker: dict, borsvar
         if t is None:
             continue
         c = kurser[t].to_numpy()
-        sista = pd.Series(c).dropna()
-        sista = float(sista.iloc[-1]) if len(sista) else np.nan
+        om = (kurser[t] * volym[t]).to_numpy() if volym is not None and t in volym.columns else None
         rd = rapporter.get(b)
         g = g.reset_index(drop=True)
         senast = {"kop": None, "salj": None, "kluster": None}
@@ -233,14 +235,15 @@ def handelser(v: pd.DataFrame, kurser: pd.DataFrame, bolag_ticker: dict, borsvar
                         return np.nan
                     return (cb / ca - 1) - (mb / ma - 1)
 
-                bv = borsvarde.get(b, np.nan) * c[i] / sista if np.isfinite(sista) and sista > 0 else np.nan
+                with np.errstate(all="ignore"):
+                    oms20 = float(np.nanmean(om[max(0, i - 20):i])) if om is not None and i > 0 else np.nan
                 kop = typ != "salj"
                 e = {"typ": typ, "bolag": b, "ticker": t, "vecka": rad.vecka, "kopdag": dagar[i],
                      "netto_sek": kop4 - salj4, "kop_sek": kop4, "salj_sek": salj4,
                      "antal": len(kopare4) if kop else len(saljare4),
                      "roll": rad.kop_roll if kop else rad.salj_roll,
                      "bara_narstaende": rad.kop_bara_narstaende if kop else rad.salj_bara_narstaende,
-                     "andel": abs(kop4 - salj4) / bv if bv and np.isfinite(bv) and bv > 0 else np.nan,
+                     "andel": abs(kop4 - salj4) / oms20 if np.isfinite(oms20) and oms20 > 0 else np.nan,
                      "fore20": avk(-20, 0)}
                 for h in HORISONTER:
                     e[f"r{h}"] = avk(0, h)
@@ -255,7 +258,7 @@ def handelser(v: pd.DataFrame, kurser: pd.DataFrame, bolag_ticker: dict, borsvar
         df["ar"] = df["kopdag"].dt.year
         orimlig = df["andel"] > MAX_ANDEL
         if orimlig.any():
-            print(f"{int(orimlig.sum())} händelser har nettoköp/sälj över {MAX_ANDEL:.0%} av börsvärdet (fel i anmälan, "
+            print(f"{int(orimlig.sum())} händelser har nettoköp/sälj över {MAX_ANDEL:.0f} dagars omsättning (fel i anmälan, "
                   "t.ex. pris i öre eller teckningsrätter) – storleken räknas inte för dem.", file=sys.stderr)
             df.loc[orimlig, "andel"] = np.nan
     return df
@@ -323,7 +326,7 @@ def kapa(x: pd.Series) -> pd.Series:
 
 
 def andel_fmt(x):
-    return f"{x * 100:.3f} %" if x < 0.001 else f"{x * 100:.2f} %"
+    return f"{x:.3g} d"
 
 
 def skriv(df: pd.DataFrame, utmapp: Path, demo: bool, rapporter: pd.DataFrame | None = None) -> tuple[Path, str]:
@@ -344,7 +347,7 @@ def skriv(df: pd.DataFrame, utmapp: Path, demo: bool, rapporter: pd.DataFrame | 
     avsnitt("1. Alla köpvågor mot alla säljvågor",
             [rad_for("Insiders köpte netto", kop), rad_for("Insiders sålde netto", salj)],
             "”20 d före” visar hur aktien gått innan – negativt betyder att insiders köper efter nedgångar.")
-    avsnitt("2. Köp efter storlek (nettoköp i procent av börsvärdet, 4 veckor)",
+    avsnitt("2. Köp efter storlek (nettoköp i dagars omsättning, 4 veckor)",
             kvintiler(kop, "andel", andel_fmt))
     antal = kop.assign(k=np.minimum(kop["antal"], 4))
     avsnitt("3. Köp efter antal olika köpare (4 veckor)",
@@ -461,7 +464,7 @@ def main() -> int:
     affarer = demo_affarer(kurser) if arg.demo else las_affarer(utmapp, tickerfil)
     borsvarde = ({sc.bolagsnyckel(t): 5e9 for t in kurser.columns} if arg.demo else sg.borsvarden(utmapp))
     v = veckor(affarer)
-    df = handelser(v, kurser, ticker_per_bolag(kurser, volym), borsvarde, rapportdagar(utmapp, arg.demo, kurser))
+    df = handelser(v, kurser, ticker_per_bolag(kurser, volym), borsvarde, rapportdagar(utmapp, arg.demo, kurser), volym)
     if df.empty:
         print("Inga händelser inom kursdatan.", file=sys.stderr)
         return 1

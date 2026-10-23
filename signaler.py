@@ -55,7 +55,7 @@ def _datum(s: pd.Series) -> pd.Series:
     """FI skriver både '2026-10-14 00:00:00' och '14/10/2026 00:00:00'."""
     s = s.astype(str).str.strip()
     iso = pd.to_datetime(s.where(s.str.match(r"^\d{4}-")), errors="coerce")
-    eu = pd.to_datetime(s.where(s.str.match(r"^\d{1,2}/")), format="%d/%m/%Y %H:%M:%S", errors="coerce")
+    eu = pd.to_datetime(s.where(s.str.match(r"^\d{1,2}/")).str.slice(0, 10), format="%d/%m/%Y", errors="coerce")
     return iso.fillna(eu).dt.normalize()
 
 
@@ -405,11 +405,12 @@ def insider_affarer(utmapp: Path, tickerfil: Path) -> pd.DataFrame:
     """Alla giltiga köp och sälj i kronor, sorterade på publiceringsdag. Tom tabell om data saknas."""
     df = las_insyn(utmapp)
     if df.empty:
-        return pd.DataFrame(columns=["publicerad", "bolag", "person", "kop", "belopp_sek"])
+        return pd.DataFrame(columns=["publicerad", "bolag", "person", "befattning", "narstaende", "kop", "belopp_sek"])
     df = df[_ar_giltig(df)].dropna(subset=["publicerad"])
     df = till_kronor(df, utmapp, tickerfil).dropna(subset=["bolag", "belopp_sek"])
     df["kop"] = df["karaktar"].str.lower().isin(["förvärv", "acquisition"])
-    return df[["publicerad", "bolag", "person", "kop", "belopp_sek"]].sort_values("publicerad").reset_index(drop=True)
+    return (df[["publicerad", "bolag", "person", "befattning", "narstaende", "kop", "belopp_sek"]]
+            .sort_values("publicerad").reset_index(drop=True))
 
 
 def rapportkalender(utmapp: Path) -> dict[str, np.ndarray]:
@@ -446,11 +447,12 @@ def insider_kandidater(aff: pd.DataFrame, kalender: dict, dag, likvida: pd.DataF
         räknas nästa vecka, så att inget köps på en kurs från innan affären blev känd)
       - nettoköp även över 4 veckor, och inga nettoköp de 4 veckorna innan (första veckan i en köpvåg)
       - nästa rapport om 31–60 dagar
-      - likvid: finns i 'likvida' (ticker, bolag – redan filtrerad på omsättning)
-    Sorteras på nettoköp i procent av börsvärdet (störst först)."""
+      - likvid: finns i 'likvida' (ticker, bolag, gärna omsattning_sek – redan filtrerad på omsättning)
+    Sorteras på nettoköpet i dagars omsättning (störst först). 'andel' av börsvärdet är bara information."""
     D = pd.Timestamp(dag).normalize()
     slut, start = D - pd.Timedelta(days=2), D - pd.Timedelta(days=8)
-    tom = pd.DataFrame(columns=["ticker", "bolag", "netto_sek", "kopare", "nasta_rapport", "dagar_till_rapport", "andel"])
+    tom = pd.DataFrame(columns=["ticker", "bolag", "netto_sek", "kopare", "nasta_rapport", "dagar_till_rapport", "andel",
+                                "dagar_oms"])
     if aff is None or aff.empty or likvida is None or likvida.empty:
         return tom
     p = aff["publicerad"].to_numpy()
@@ -474,6 +476,8 @@ def insider_kandidater(aff: pd.DataFrame, kalender: dict, dag, likvida: pd.DataF
     if not kandid:
         return tom
     lik = likvida.drop_duplicates("bolag").set_index("bolag")["ticker"]
+    oms = (likvida.drop_duplicates("bolag").set_index("bolag")["omsattning_sek"]
+           if "omsattning_sek" in likvida.columns else pd.Series(dtype=float))
     f4 = a[(a["publicerad"] >= slut - pd.Timedelta(days=27)) & (a["publicerad"] <= slut) & a["kop"]]
     kopare = f4.groupby("bolag")["person"].nunique()
     rader = []
@@ -494,11 +498,15 @@ def insider_kandidater(aff: pd.DataFrame, kalender: dict, dag, likvida: pd.DataF
             if len(s) and len(fore) and s.iloc[-1] > 0:
                 bv = borsvarde[b] * fore.iloc[-1] / s.iloc[-1]   # börsvärdet då ≈ dagens × kursutvecklingen
                 andel = fyra[b] / bv if bv > 0 else np.nan
+        o = oms.get(b, np.nan)
         rader.append({"ticker": t, "bolag": b, "netto_sek": float(fyra[b]), "kopare": int(kopare.get(b, 0)),
-                      "nasta_rapport": r, "dagar_till_rapport": dagar, "andel": andel})
+                      "nasta_rapport": r, "dagar_till_rapport": dagar, "andel": andel,
+                      "dagar_oms": float(fyra[b]) / o if pd.notna(o) and o > 0 else np.nan})
     if not rader:
         return tom
-    return (pd.DataFrame(rader).sort_values(["andel", "netto_sek"], ascending=False, na_position="last")
+    # Ordning: nettoköpet i dagars omsättning (bara det som var känt då). 'andel' av börsvärdet visas men används
+    # inte för ordningen – börsvärdet bakåt räknas med dagens kurs och skulle i backtest läcka framtida kursutveckling.
+    return (pd.DataFrame(rader).sort_values(["dagar_oms", "netto_sek"], ascending=False, na_position="last")
             .reset_index(drop=True))
 
 
@@ -515,7 +523,8 @@ def veckans_insidersignaler(tabell: pd.DataFrame, utmapp: Path, tickerfil: Path,
     if aff.empty:
         return pd.DataFrame()
     kurser = ih.las_kurser(Path(utmapp) / "kurser.csv")
-    kand = insider_kandidater(aff, rapportkalender(utmapp), dag, t[["ticker", "bolag"]], borsvarden(utmapp), kurser)
+    kol = [k for k in ("ticker", "bolag", "omsattning_sek") if k in t.columns]
+    kand = insider_kandidater(aff, rapportkalender(utmapp), dag, t[kol], borsvarden(utmapp), kurser)
     if kand.empty:
         return kand
     extra = t.set_index("ticker")
@@ -524,5 +533,5 @@ def veckans_insidersignaler(tabell: pd.DataFrame, utmapp: Path, tickerfil: Path,
     kand["likvid"] = kand["omsattning_sek"] >= sc.KONFIG["min_omsattning_sek"]
     kand["plats"] = kand["ticker"].map(extra["plats"]) if "plats" in extra.columns else np.nan
     kand["godkand"] = kand["ticker"].map(extra["godkand"]) if "godkand" in extra.columns else False
-    return kand.sort_values(["likvid", "andel", "netto_sek"], ascending=[False, False, False],
+    return kand.sort_values(["likvid", "dagar_oms", "netto_sek"], ascending=[False, False, False],
                             na_position="last").reset_index(drop=True)

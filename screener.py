@@ -407,7 +407,14 @@ GULD_TEXT = ("Insiders har köpt netto (publicerat fredag–torsdag, första vec
 def _guld_rad(r) -> dict:
     andel = f"{r.andel * 100:.3f} %" if pd.notna(r.andel) else "–"
     plats = f"plats {int(r.plats)}" if pd.notna(r.plats) else ("klarar trendfilter" if r.godkand else "ej i momentumlistan")
+    dagar_oms = getattr(r, "dagar_oms", np.nan)
+    p = getattr(r, "ml_p", np.nan)
+    modell = (f"{p * 100:.0f} % {'✓' if p >= r.ml_grans else '✗'}" if pd.notna(p) else "–")
+    skal = " · ".join(x for x in (f"för: {r.ml_for}" if getattr(r, "ml_for", "") else "",
+                                  f"emot: {r.ml_emot}" if getattr(r, "ml_emot", "") else "") if x)
     return {"ticker": r.ticker, "namn": r.namn if isinstance(r.namn, str) else "", "netto": f"{r.netto_sek / 1e6:.1f} MSEK",
+            "dagar_oms": f"{dagar_oms:.2f}" if pd.notna(dagar_oms) else "–", "modell": modell, "skal": skal,
+            "modell_ok": bool(pd.notna(p) and p >= r.ml_grans),
             "andel": andel, "kopare": str(int(r.kopare)), "rapport": f"{pd.Timestamp(r.nasta_rapport):%Y-%m-%d}",
             "dagar": str(int(r.dagar_till_rapport)),
             "oms": f"{r.omsattning_sek / 1e6:.0f}" if pd.notna(r.omsattning_sek) else "–", "plats": plats,
@@ -421,10 +428,12 @@ def guld_markdown(guld) -> list[str]:
     if not len(guld):
         return ut + ["Inga signaler denna vecka.", ""]
     rader = [_guld_rad(r) for r in guld.itertuples()]
-    ut += ["| | Aktie | Insiders netto (4 v) | Av börsvärdet | Köpare | Rapport | Dagar kvar | Oms/dag MSEK | Momentum |",
-           "|---|---|---|---|---|---|---|---|---|"]
-    ut += [f"| {'★' if r['likvid'] else '·'} | {r['ticker']} {r['namn']} | {r['netto']} | {r['andel']} | {r['kopare']} | "
-           f"{r['rapport']} | {r['dagar']} | {r['oms']} | {r['plats']} |" for r in rader]
+    ut += ["| | Aktie | Insiders netto (4 v) | Dagars omsättning | Av börsvärdet | Köpare | Rapport | Dagar kvar | Oms/dag MSEK | Momentum | Modellen |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    ut += [f"| {'★' if r['likvid'] else '·'} | {r['ticker']} {r['namn']} | {r['netto']} | {r['dagar_oms']} | {r['andel']} | {r['kopare']} | "
+           f"{r['rapport']} | {r['dagar']} | {r['oms']} | {r['plats']} | {r['modell']} |" for r in rader]
+    if any(r["skal"] for r in rader):
+        ut += ["", "**Modellens skäl:** " + "; ".join(f"{r['ticker']}: {r['skal']}" for r in rader if r["skal"])]
     if not all(r["likvid"] for r in rader):
         ut += ["", "· = omsättning under 5 MSEK/dag – strategin köper inte dessa."]
     return ut + [""]
@@ -442,13 +451,22 @@ def guld_html(guld) -> str:
             rader.append(f'<tr class="{"" if r["likvid"] else "tunn"}"><td><b data-t="{e(r["ticker"])}">'
                          f'{"★ " if r["likvid"] else ""}{e(r["ticker"].removesuffix(".ST"))}</b><br>'
                          f'<span class="muted">{e(r["namn"])}</span></td><td class="num">{e(r["netto"])}</td>'
+                         f'<td class="num">{e(r["dagar_oms"])}</td>'
                          f'<td class="num">{e(r["andel"])}</td><td class="num">{e(r["kopare"])}</td>'
                          f'<td class="num">{e(r["rapport"])}</td><td class="num"><b>{e(r["dagar"])}</b></td>'
-                         f'<td class="num">{e(r["oms"])}</td><td>{e(r["plats"])}</td></tr>')
+                         f'<td class="num">{e(r["oms"])}</td><td>{e(r["plats"])}</td>'
+                         f'<td class="num"><b class="{"pos" if r["modell_ok"] else "muted"}">{e(r["modell"])}</b></td>'
+                         f'<td class="small" style="min-width:240px">{e(r["skal"])}</td></tr>')
         inne = ('<div class="wrap" style="margin-top:8px"><table style="min-width:720px"><thead><tr><th>Aktie</th>'
-                '<th class="num">Insiders netto (4 v)</th><th class="num">Av börsvärdet</th><th class="num">Köpare</th>'
+                '<th class="num">Insiders netto (4 v)</th><th class="num" title="Nettoköpet delat med aktiens snittomsättning per dag – ordningen strategin köper i">Dagars omsättning</th><th class="num">Av börsvärdet</th><th class="num">Köpare</th>'
                 '<th class="num">Rapport</th><th class="num">Dagar kvar</th><th class="num">Oms/dag MSEK</th>'
-                f'<th>Momentum</th></tr></thead><tbody>{"".join(rader)}</tbody></table></div>')
+                f'<th>Momentum</th><th class="num" title="Maskininlärningens sannolikhet att aktien slår marknaden efter kostnad till säljdagen. ✓ = över gränsen. Bara information – påverkar inga köp.">Modellen</th>'
+                f'<th>Modellens skäl</th></tr></thead><tbody>{"".join(rader)}</tbody></table></div>')
+        m = guld.attrs.get("modell")
+        if m:
+            inne += (f'<p class="muted small">Modellen (insiderml.py) är under prövning: den klarade 3 av 4 krav i '
+                     f'backtestet och påverkar inga köp. Tränad {e(m["tranad"])} på {m["signaler"]} signaler. '
+                     'Bedömningarna sparas varje vecka så att den kan utvärderas framåt.</p>')
         if any(not x for x in guld["likvid"]):
             inne += '<p class="muted small">Grå rad = omsättning under 5 MSEK/dag – strategin köper inte dessa.</p>'
     return (f'<section class="guld"><h2>★ Insidersignaler denna vecka <span class="tag guldtag">under validering</span></h2>'
@@ -603,7 +621,7 @@ tr.urval td {{ background:var(--urval) }}
 tr.guldrad td:first-child {{ box-shadow: inset 4px 0 0 #d4a017 }}
 .guld {{ border:2px solid #d4a017; background:rgba(212,160,23,.10); border-radius:10px; padding:14px 16px; margin:16px 0 }}
 .guld h2 {{ margin:0; font-size:18px; color:#b8860b }}
-.guld table {{ min-width:720px }} .guld tr.tunn td {{ opacity:.55 }}
+.guld table {{ min-width:1100px }} .guld tr.tunn td {{ opacity:.55 }}
 .guldtag {{ background:#d4a017 !important; color:#1c1f24 !important }}
 @media (prefers-color-scheme: dark) {{ .guld h2 {{ color:#f0c040 }} }}
 .num {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }} .mid {{ text-align:center }}
@@ -688,6 +706,8 @@ def main() -> int:
     p.add_argument("--innehav", default="", help=argparse.SUPPRESS)  # ersatt av innehav.csv
     p.add_argument("--utmapp", default=KONFIG["utmapp"], help="mapp för rapporterna")
     p.add_argument("--demo", action="store_true", help="kör med påhittad data (ingen internet)")
+    p.add_argument("--utan-strategier", action="store_true",
+                   help="uppdatera rapporten utan att strategierna handlar (extra körning mitt i veckan)")
     a = p.parse_args()
 
     utmapp = Path(a.utmapp).expanduser()
@@ -770,6 +790,11 @@ def main() -> int:
         import signaler
         guld = signaler.veckans_insidersignaler(tabell, utmapp, Path(a.tickers))
         tabell["insider_signal"] = tabell["ticker"].isin(set(guld["ticker"])) if guld is not None and len(guld) else False
+        try:   # maskininlärningens bedömning (insiderml.py) – bara information, påverkar inga köp
+            import insiderml
+            guld = insiderml.bedom_veckan(guld, utmapp, tabell)
+        except Exception as fel:
+            print(f"Modellens bedömning kunde inte räknas: {type(fel).__name__}: {fel}", file=sys.stderr)
     except Exception as fel:
         print(f"Insidersignalerna kunde inte räknas: {type(fel).__name__}: {fel}", file=sys.stderr)
 
@@ -782,6 +807,9 @@ def main() -> int:
     print(f"Sparad: {utmapp / 'senaste.html'}", file=sys.stderr)
 
     # Virtuella strategiportföljer (pappershandel). Ett fel här får aldrig stoppa veckorapporten.
+    if a.utan_strategier:
+        print("Strategierna körs inte (--utan-strategier). De handlar vid nästa veckokörning.", file=sys.stderr)
+        return 0
     try:
         import strategier
         for rad in strategier.kor_alla(utmapp, a.demo):

@@ -272,6 +272,7 @@ Det enda sättet att veta om en strategi fungerar är att se den gå framåt i t
 | Slumpportfölj | Köper slumpvisa aktier bland de godkända (som klarar trendfiltren). Ingen rankningsregel vid sälj – annars samma säljregler | Hur mycket ger ren tur? Måttstocken för alla andra |
 | Insider 30 | Köper när insiders köpt netto (publicerat fredag–torsdag, första veckan i en köpvåg) och nästa rapport är 31–60 dagar bort. Omsättning minst 5 MSEK/dag. Säljer vid första veckokörningen 30 dagar efter rapporten. Inga trend- eller stoppregler | Vet insiders något om rapporten? (insideranalysen: +1,2 % reaktion, 8 av 9 år) |
 | Insider 60 | Samma köp, säljer 60 dagar efter rapporten | Lönar det sig att hålla kvar pengarna i stället för att vänta i kassa? |
+| Insider 30 + index | Som Insider 30, men pengar som inte används ligger i en indexfond (OMXSPI + 3 % utdelning − 0,2 % avgift). Fondandelar säljs vid köp och köps tillbaka vid sälj | Index som kärna och guldstjärnorna som tillägg (indexprovet: +224,8 % mot fonden +144,8 % 2018–2026) |
 
 B, C och Momentum + kvalitet behöver nyckeltal från senaste veckan. Saknas de väntar strategin i stället för att handla på gammal data. Saknar en enskild aktie poäng tas den inte bort i B och räknas som medel (50) i C och Momentum + kvalitet. Slumpportföljens lottning bestäms av strategi och datum, så en omkörning ger samma lottning.
 
@@ -374,6 +375,71 @@ Varje rad i utskriften visar en källa. `FEL` på en källa stoppar inte de andr
 Rapporterna delas i fem lika stora grupper efter EPS-överraskningen och efter kursreaktionen, och varje grupps drift visas – även år för år och efter kostnad (0,7 % per affär). Resultatet sparas i `analys/rapportanalys_DATUM.html` (öppna från Windows) och `.md`, och varje rapport med sina mått i `analys/rapporthandelser.csv`.
 
 Rapporter som Yahoo listar två gånger inom 20 dagar slås ihop. Tabellen *Täckning* visar hur många rapporter varje år som har data för varje mått.
+
+## Språk: svenska eller engelska
+
+Webbsidan är på svenska som standard. Knappen **EN** uppe till höger (bredvid Data) byter till engelska, och **SV** byter tillbaka. Valet sparas i webbläsaren i ett år, så telefon och dator kan ha olika språk.
+
+Översättningen görs på den färdiga sidan precis innan den skickas (`sprak.py`), med ordlistan i `oversattning.py`. Därför blir också veckorapporten, strategiernas loggar och graferna engelska, utan att mallarna i `app.py` ändrats. Text som saknas i ordlistan visas på svenska. För att lista saknade texter, starta webben med `SCREENER_SPRAK_LOGG=1`. De skrivs då till `.saknade_oversattningar.txt` i datamappen. Lägg till dem i `oversattning.py` och starta om `screener-web`.
+
+## Insider ML: kan en modell sortera bort de insidersignaler som inte fungerar?
+
+`insiderml.py` tar varje signal som Insider 30 hade fått sedan 2018 och tränar en liten modell (scikit-learn, körs på vanlig processor på några minuter) som uppskattar om aktien slår marknaden efter kostnad fram till säljdagen. Testet är walk-forward per år: modellen tränas bara på signaler vars facit var känt före testårets början. Ramar och fyra krav (K1–K4) är bestämda i förväg och står överst i filen. Klaras alla blir modellen en kandidat till strategin *Insider ML v1*, annars behålls Insider 30.
+
+```bash
+./venv/bin/pip install scikit-learn                              # en gång
+./venv/bin/python insiderml.py --utmapp /srv/storage/aktiedata   # några minuter
+```
+
+Resultat i `analys/insiderml_DATUM.html` och `.md`, och varje signal med egenskaper och modellens bedömning i `analys/insiderml_signaler.csv`.
+
+På webbsidan finns körningen under **Strategier → Backtest → Insider ML** med tre portföljer: Insider 30 under samma period, Insider ML (bara godkända signaler) och ett slumpfilter. Varje köp i Insider ML visar modellens sannolikhet, gränsen och de två egenskaper som drog mest för och emot. Längst ned på Insider ML-sidan finns tabellen **Modellens bedömningar**: varje signal år för år, godkänd eller inte, med skälen och det verkliga utfallet. De tre portföljerna (`strategier.VISNING`) finns bara i backtest och handlar aldrig framåt.
+
+**Modellen i veckorapporten (information):** efter körningen tränas modellen på alla signaler med känt facit och sparas i `analys/insiderml_modell.pkl`. Guldrutan visar då kolumnerna *Modellen* (sannolikhet, ✓ över gränsen) och *Modellens skäl* för veckans insidersignaler. Bedömningarna loggas i `analys/insiderml_live.csv`, så att modellen kan utvärderas på signaler den aldrig sett. Den påverkar inga köp. Kör om en gång i månaden så lär den sig av nya signaler:
+
+```
+0 7 1 * * cd ~/screener && ./venv/bin/python insiderml.py --utmapp /srv/storage/aktiedata --utan-portfoljer >> /srv/storage/aktiedata/insiderml_logg.txt 2>&1
+```
+
+**Storlek utan framtidsinformation (rättat 2026-10-20):** börsvärdet bakåt i tiden räknas med dagens kurs och läcker därför framtida kursutveckling in i backtest. Insiderstrategierna köper därför i ordning efter *nettoköpet i dagars omsättning* (nettoköp / snittomsättning per dag före köpet), och insideranalysens storleksgrupper använder samma mått. Andel av börsvärdet visas fortfarande i veckorapporten som information.
+
+## Överlevnadsfel: hur många insiderköp gällde bolag som inte finns kvar?
+
+Backtesten använder dagens bolagslista, så bolag som försvunnit sedan 2018 (konkurs, uppköp, avnotering) saknas. FI:s insynsregister har alla bolag, och `overlevnad.py` räknar hur stor del av köpvågorna som gällde bolag utanför dagens lista. Bolag utan insynsanmälan de senaste 12 månaderna räknas som troligen försvunna, övriga som andra marknader (First North m.fl.).
+
+```bash
+./venv/bin/python overlevnad.py --utmapp /srv/storage/aktiedata
+```
+
+## Indexprov: index som kärna, guldstjärnorna som tillägg
+
+`indexprov.py` jämför Insider 30 med samma strategi där oanvända pengar ligger i en indexfond (OMXSPI + 3 % utdelning − 0,2 % avgift per år, ungefär som Avanza Sweden eller LF Sverige Index), bara indexfonden, och blandningar som 80 % fond + 20 % guldstjärnepott. Tre krav bestämda i förväg: slå Insider 30 med kontant kassa, slå fonden totalt, och slå fonden minst 5 av 9 år. Visas också under **Strategier → Backtest → Indexprov**.
+
+```bash
+./venv/bin/python indexprov.py --utmapp /srv/storage/aktiedata
+```
+
+## Variantprov: ändringar av Insider 30
+
+`variantprov.py` kör Insider 30 och varianter sida vid sida 2018–2026 och prövar varianterna mot krav som bestämts i förväg (slå Insider 30 totalt, i minst 5 av 9 år, och högst 5 procentenheter värre största nedgång). Första provet (2026-10-23): sälj före rapporten om aktien stigit minst 20 % sedan köpet – antingen direkt när +20 % nås, eller bara vid sista veckokörningen före rapporten. Visar också hur många dagar det tar från insideraffär till publicering.
+
+```bash
+./venv/bin/python variantprov.py --utmapp /srv/storage/aktiedata
+```
+
+## Validering av Insider 30
+
+`validering.py` prövar backtestresultatet mot sex krav som bestämdes i förväg (2026-10-19): slå en kontroll med slumpvisa aktier och samma rapporttiming (Rapport-slump), slå den lika viktade marknaden med utdelningar, slå den i båda halvorna (före och från 2023), slå den utan de 10 bästa affärerna, slå den med köp en vecka senare, och att fyra grannregler (fönster 21–60 och 31–75 dagar, sälj 20 och 40 dagar efter rapport) också slår den. Insider 30 ändras inte av resultatet.
+
+```bash
+./venv/bin/python validering.py --utmapp /srv/storage/aktiedata   # 10–20 minuter
+```
+
+Resultat i `analys/validering_DATUM.html` och `.md`.
+
+## Insidersignaler i veckorapporten
+
+Överst i veckorapporten finns rutan **★ Insidersignaler denna vecka** (märkt *under validering*). Den visar varje bolag som uppfyller Insider 30:s köpregel just den veckan – också de som inte finns i momentumlistan – med insidernas nettoköp, andel av börsvärdet, antal köpare, rapportdatum och dagar kvar. Grå rader har omsättning under 5 MSEK/dag och köps inte av strategin. Finns aktien i topplistan får raden en guldkant och märket ★ insider, och aktiesidan visar en guldruta. Kolumnen `insider_signal` sparas i `screener_DATUM.csv`. Påverkar inte momentumrankningen.
 
 ## Insideranalys: går aktier bättre efter insiderköp?
 

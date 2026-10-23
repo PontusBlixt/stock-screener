@@ -205,7 +205,8 @@ def likvida(data: dict, lor: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def simulera_insider(rot: Path, data: dict, lordagar: pd.DatetimeIndex, varianter: dict) -> int:
     """Kör insiderstrategier vecka för vecka i rot/strategier/. varianter = {sid: {"fonster": (31, 60),
-    "fordrojning": 0 (veckor), "slump": False}}. Strategierna måste finnas i strategier.STRATEGIER.
+    "fordrojning": 0 (veckor), "slump": False, "filter": None}}. Strategierna måste finnas i strategier.STRATEGIER.
+    filter = funktion (kandidater, lördag, sid) -> de kandidater som får köpas.
     slump=True: lika många slumpvisa likvida aktier som insidersignalerna, med rapport inom samma fönster."""
     import zlib
     import signaler as sg
@@ -232,6 +233,8 @@ def simulera_insider(rot: Path, data: dict, lordagar: pd.DatetimeIndex, variante
                 rng = np.random.default_rng(zlib.crc32(f"{sid}{rapport}".encode()))
                 pool = pd.DataFrame(pool, columns=kand.columns)
                 kand = pool.iloc[rng.permutation(len(pool))[:len(kand)]].reset_index(drop=True)
+            if v.get("filter") is not None and len(kand):   # t.ex. maskininlärningens urval (insiderml.py)
+                kand = v["filter"](kand, lor, sid).reset_index(drop=True)
             f = v.get("fordrojning", 0)
             if f:
                 kö = tidigare.setdefault(sid, [])
